@@ -17,10 +17,11 @@ const WIN_R: f32 = 18.0; // window corner radius
 const PANEL_R: f32 = 20.0; // glass panel radius
 const GLASS_A: f32 = 77.0; // 30% white tint over the frosted wallpaper; // base white tint of the acrylic (top is lighter, bottom darker)
 const GRAIN_A: u8 = 0; // acrylic noise strength (0 = off; it looked speckled, so it is disabled)
-const ICO: &[u8] = include_bytes!("../kasandra.ico");
+const ICON_PNG: &[u8] = include_bytes!("../kasandra.png"); // runtime icon (title bar, taskbar); the .ico is only used by build.rs for the exe
 const ACCENT: Color32 = Color32::from_rgb(10, 140, 255); // slider fill, same blue as the reference theme
 const BOT_H: f32 = 118.0; // height of the background controls at the bottom of the sidebar
-const BLUR_MAX: f32 = 14.0;
+const BLUR_MAX: f32 = 1.0; // slider range 0..1
+const BLUR_PX: f32 = 32.0; // wallpaper blur radius in px at slider = 1 (curve is quadratic, so low values stay gentle)
 const BG_W: usize = 960;
 const BG_H: usize = 540;
 const GREEN: Color32 = Color32::from_rgb(46, 204, 98);
@@ -372,17 +373,53 @@ fn procedural_bg() -> Vec<[f32; 3]> {
             buf[y * W + x] = c;
         }
     }
+    let mut buf = buf;
+    box_blur_fast(&mut buf, W, H, 2); // the reeded wallpaper is lightly soft by design
     buf
 }
 
-/// Lightly softened full-res copy used for the window background itself.
-fn sharp_img(buf: &[[f32; 3]]) -> egui::ColorImage {
-    let mut s = buf.to_vec();
-    box_blur(&mut s, BG_W, BG_H, 2);
-    to_img(&s, BG_W, BG_H)
+/// Box blur in O(1) per pixel (prefix sums); edges average over the pixels that exist.
+fn box_blur_fast(buf: &mut [[f32; 3]], w: usize, h: usize, r: usize) {
+    if r == 0 {
+        return;
+    }
+    let mut tmp = buf.to_vec();
+    let mut pre = vec![[0f32; 3]; w.max(h) + 1];
+    for y in 0..h {
+        for x in 0..w {
+            let (p, q) = (buf[y * w + x], pre[x]);
+            pre[x + 1] = [q[0] + p[0], q[1] + p[1], q[2] + p[2]];
+        }
+        for x in 0..w {
+            let (a, b) = (x.saturating_sub(r), (x + r + 1).min(w));
+            let n = (b - a) as f32;
+            let (s1, s0) = (pre[b], pre[a]);
+            tmp[y * w + x] = [(s1[0] - s0[0]) / n, (s1[1] - s0[1]) / n, (s1[2] - s0[2]) / n];
+        }
+    }
+    for x in 0..w {
+        for y in 0..h {
+            let (p, q) = (tmp[y * w + x], pre[y]);
+            pre[y + 1] = [q[0] + p[0], q[1] + p[1], q[2] + p[2]];
+        }
+        for y in 0..h {
+            let (a, b) = (y.saturating_sub(r), (y + r + 1).min(h));
+            let n = (b - a) as f32;
+            let (s1, s0) = (pre[b], pre[a]);
+            buf[y * w + x] = [(s1[0] - s0[0]) / n, (s1[1] - s0[1]) / n, (s1[2] - s0[2]) / n];
+        }
+    }
 }
 
-/// Quarter-res copy; the blur slider works on this one so dragging stays instant.
+/// The wallpaper at blur radius `r` pixels (0 = untouched). Two box passes ~ a gaussian.
+fn wall_buf(buf: &[[f32; 3]], r: usize) -> Vec<[f32; 3]> {
+    let mut b = buf.to_vec();
+    box_blur_fast(&mut b, BG_W, BG_H, r);
+    box_blur_fast(&mut b, BG_W, BG_H, r);
+    b
+}
+
+/// Quarter-res copy, used for the frosted glass layer.
 fn downsample(buf: &[[f32; 3]]) -> Vec<[f32; 3]> {
     let (sw, sh) = (BG_W / 4, BG_H / 4);
     let mut small = vec![[0f32; 3]; sw * sh];
@@ -403,36 +440,19 @@ fn downsample(buf: &[[f32; 3]]) -> Vec<[f32; 3]> {
     small
 }
 
-/// The wallpaper itself: radius `r` (0 = sharp). Blurs the quarter-res copy so dragging stays instant.
-fn wall_img(buf: &[[f32; 3]], small: &[[f32; 3]], r: usize) -> egui::ColorImage {
-    if r == 0 {
-        return sharp_img(buf);
-    }
+/// The frosted layer behind every glass surface: the (already blurred) wallpaper, blurred more, + 125% saturation.
+fn glass_img(wall: &[[f32; 3]]) -> egui::ColorImage {
     let (sw, sh) = (BG_W / 4, BG_H / 4);
-    let mut b = small.to_vec();
-    box_blur(&mut b, sw, sh, r);
-    box_blur(&mut b, sw, sh, r);
-    to_img(&b, sw, sh)
-}
-
-/// The frosted layer behind every glass surface: blur radius `r` (0 = no blur) + 125% saturation.
-fn blur_img(buf: &[[f32; 3]], small: &[[f32; 3]], r: usize) -> egui::ColorImage {
-    let (mut b, w, h) = if r == 0 {
-        (buf.to_vec(), BG_W, BG_H)
-    } else {
-        let (sw, sh) = (BG_W / 4, BG_H / 4);
-        let mut b = small.to_vec();
-        box_blur(&mut b, sw, sh, r);
-        box_blur(&mut b, sw, sh, r);
-        (b, sw, sh)
-    };
+    let mut b = downsample(wall);
+    box_blur(&mut b, sw, sh, 5);
+    box_blur(&mut b, sw, sh, 5);
     for p in b.iter_mut() {
         let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
         for c in p.iter_mut() {
             *c = l + (*c - l) * 1.25;
         }
     }
-    to_img(&b, w, h)
+    to_img(&b, sw, sh)
 }
 
 /// Load any image, cover-crop it to the background aspect ratio.
@@ -442,9 +462,46 @@ fn load_bg(path: &std::path::Path) -> Result<Vec<[f32; 3]>, String> {
     Ok(img.pixels().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect())
 }
 
-/// Decode the embedded kasandra.ico at a given square size.
+/// egui's built-in font only has Latin glyphs (everything else shows as empty boxes), so append
+/// whatever system fonts exist as fallbacks: Arabic/Hebrew/Cyrillic/Greek, CJK, Korean, Indic, symbols.
+fn setup_fonts(ctx: &Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let paths = [
+        // Windows
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\seguisym.ttf",
+        "C:\\Windows\\Fonts\\nirmala.ttf",
+        "C:\\Windows\\Fonts\\malgun.ttf",
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\YuGothR.ttc",
+        // macOS
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/SFArabic.ttf",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        // Linux
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ];
+    for (i, path) in paths.iter().enumerate() {
+        if let Ok(bytes) = std::fs::read(path) {
+            let name = format!("sys{i}");
+            fonts.font_data.insert(name.clone(), egui::FontData::from_owned(bytes));
+            for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                if let Some(list) = fonts.families.get_mut(&fam) {
+                    list.push(name.clone());
+                }
+            }
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// Decode the embedded kasandra.png at a given square size.
 fn icon_rgba(size: u32) -> Option<image::RgbaImage> {
-    image::load_from_memory_with_format(ICO, image::ImageFormat::Ico)
+    image::load_from_memory(ICON_PNG)
         .ok()
         .map(|i| i.resize_exact(size, size, image::imageops::FilterType::Lanczos3).to_rgba8())
 }
@@ -701,7 +758,6 @@ struct App {
     grain: TextureHandle,
     icon: TextureHandle,
     bg_buf: Vec<[f32; 3]>,
-    bg_small: Vec<[f32; 3]>,
     blur_amt: f32,
     blur_applied: usize,
     sidebar: bool,
@@ -722,6 +778,7 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_fonts(&cc.egui_ctx);
         let mut v = egui::Visuals::light();
         for w in [
             &mut v.widgets.noninteractive,
@@ -737,9 +794,8 @@ impl App {
         v.window_stroke = Stroke::NONE;
         cc.egui_ctx.set_visuals(v);
         let bg_buf = procedural_bg();
-        let bg_small = downsample(&bg_buf);
-        let bg = cc.egui_ctx.load_texture("bg", wall_img(&bg_buf, &bg_small, 0), egui::TextureOptions::LINEAR);
-        let bg_blur = cc.egui_ctx.load_texture("bg_blur", blur_img(&bg_buf, &bg_small, 5), egui::TextureOptions::LINEAR);
+        let bg = cc.egui_ctx.load_texture("bg", to_img(&bg_buf, BG_W, BG_H), egui::TextureOptions::LINEAR);
+        let bg_blur = cc.egui_ctx.load_texture("bg_blur", glass_img(&bg_buf), egui::TextureOptions::LINEAR);
         let icon_img = match icon_rgba(64) {
             Some(im) => egui::ColorImage::from_rgba_unmultiplied([64, 64], &im.into_raw()),
             None => egui::ColorImage::new([1, 1], Color32::TRANSPARENT),
@@ -753,7 +809,6 @@ impl App {
             grain,
             icon,
             bg_buf,
-            bg_small,
             blur_amt: 0.0,
             blur_applied: 0,
             sidebar: false,
@@ -812,21 +867,24 @@ impl App {
         }
     }
 
-    /// New chat inside project `pj` (re-uses an empty one if it exists).
+    fn blur_radius(&self) -> usize {
+        (self.blur_amt * self.blur_amt * BLUR_PX).round() as usize
+    }
+
     fn apply_blur(&mut self) {
-        let r = self.blur_amt.round() as usize;
-        self.bg.set(wall_img(&self.bg_buf, &self.bg_small, r), egui::TextureOptions::LINEAR);
-        // glass frosting stays at least as soft as before, and follows the wallpaper when it gets blurrier
-        self.bg_blur.set(blur_img(&self.bg_buf, &self.bg_small, r.max(5)), egui::TextureOptions::LINEAR);
+        let r = self.blur_radius();
+        let wall = wall_buf(&self.bg_buf, r);
+        self.bg.set(to_img(&wall, BG_W, BG_H), egui::TextureOptions::LINEAR);
+        self.bg_blur.set(glass_img(&wall), egui::TextureOptions::LINEAR);
         self.blur_applied = r;
     }
 
     fn set_bg(&mut self, buf: Vec<[f32; 3]>) {
-        self.bg_small = downsample(&buf);
         self.bg_buf = buf;
         self.apply_blur();
     }
 
+    /// New chat inside project `pj` (re-uses an empty one if it exists).
     fn new_chat(&mut self, pj: usize) {
         self.projects[pj].open = true;
         self.cur_project = Some(pj);
@@ -1356,6 +1414,8 @@ impl App {
                                     pos2(card.right() - 6.0, card.bottom() - 8.0),
                                 );
                                 ui.allocate_ui_at_rect(lr, |ui| {
+                                    // the parent row is left-to-right; force a vertical list so models stack instead of overlapping
+                                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
                                     egui::ScrollArea::vertical()
                                         .id_source(("ml", pi))
                                         .auto_shrink([false, false])
@@ -1383,6 +1443,7 @@ impl App {
                                                 r.on_hover_text(m.as_str());
                                             }
                                         });
+                                    });
                                 });
                             }
                         });
@@ -1525,7 +1586,8 @@ fn bubble(ui: &mut Ui, m: &Msg) {
             .inner_margin(Margin::symmetric(14.0, 10.0))
             .show(ui, |ui| {
                 ui.set_max_width(maxw);
-                ui.add(egui::Label::new(RichText::new(&m.text).size(15.0).color(col)));
+                // labels don't wrap by default inside a left-to-right layout, so ask for it explicitly
+                ui.add(egui::Label::new(RichText::new(&m.text).size(15.0).color(col)).wrap_mode(egui::TextWrapMode::Wrap));
             });
     });
     ui.add_space(8.0);
@@ -1554,7 +1616,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
-        if self.blur_amt.round() as usize != self.blur_applied {
+        if self.blur_radius() != self.blur_applied {
             self.apply_blur();
         }
 
