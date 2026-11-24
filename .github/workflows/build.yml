@@ -10,14 +10,13 @@ on:
 permissions:
   contents: write
 
-# cancel older runs of the same branch/PR so they don't eat build time
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0          # incremental data is useless in CI and bloats the cache
+  CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   CARGO_PROFILE_RELEASE_DEBUG: 0
 
@@ -40,12 +39,11 @@ jobs:
           - name: macos-arm64
             os: macos-latest
             bin: kasandra
-            out: kasandra-macos-arm64
+            out: kasandra-macos-arm64.zip
 
     steps:
       - uses: actions/checkout@v4
 
-      # cached apt packages (skips the slow apt-get install on repeat runs)
       - name: Install Linux deps
         if: runner.os == 'Linux'
         uses: awalsh128/cache-apt-pkgs-action@v1
@@ -55,8 +53,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # caches ~/.cargo registry + target/ dependencies; only main writes the cache,
-      # PRs and tags read from it
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: kasandra-${{ matrix.name }}
@@ -66,17 +62,80 @@ jobs:
       - name: Build (release)
         run: cargo build --release
 
-      # give each binary a unique name: with archive:false the file name becomes the artifact name
+      # ---------- Windows / Linux: bare binary ----------
       - name: Rename binary
+        if: runner.os != 'macOS'
         shell: bash
         run: cp "target/release/${{ matrix.bin }}" "${{ matrix.out }}"
 
-      # v7+ with archive:false uploads the single file as-is (no zip)
+      # ---------- macOS: .app bundle with icon (a bundle is a folder, so it ships as one zip) ----------
+      - name: Make macOS .app
+        if: runner.os == 'macOS'
+        run: |
+          APP=Kasandra.app
+          mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
+          cp target/release/kasandra $APP/Contents/MacOS/kasandra
+
+          # kasandra.png -> kasandra.icns
+          mkdir kasandra.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s kasandra.png --out kasandra.iconset/icon_${s}x${s}.png
+            sips -z $((s*2)) $((s*2)) kasandra.png --out kasandra.iconset/icon_${s}x${s}@2x.png
+          done
+          iconutil -c icns kasandra.iconset -o $APP/Contents/Resources/kasandra.icns
+
+          cat > $APP/Contents/Info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Kasandra</string>
+            <key>CFBundleDisplayName</key><string>Kasandra</string>
+            <key>CFBundleIdentifier</key><string>com.kasandra.app</string>
+            <key>CFBundleExecutable</key><string>kasandra</string>
+            <key>CFBundleIconFile</key><string>kasandra</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleVersion</key><string>1.0</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+
+          codesign --force --deep -s - $APP
+          ditto -c -k --keepParent $APP "${{ matrix.out }}"
+
       - uses: actions/upload-artifact@v7
         with:
           path: ${{ matrix.out }}
           archive: false
           if-no-files-found: error
+
+      # ---------- Linux: launcher files, uploaded as plain files next to the binary ----------
+      - name: Linux desktop entry
+        if: runner.os == 'Linux'
+        run: |
+          cat > kasandra.desktop <<'DESK'
+          [Desktop Entry]
+          Name=Kasandra
+          Exec=kasandra
+          Icon=kasandra
+          Type=Application
+          Categories=Utility;
+          StartupWMClass=kasandra
+          DESK
+
+      - name: Upload kasandra.desktop
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          path: kasandra.desktop
+          archive: false
+
+      - name: Upload kasandra.png
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          path: kasandra.png
+          archive: false
 
   release:
     name: Publish release
