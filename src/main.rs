@@ -86,22 +86,22 @@ fn hit(ui: &mut Ui, rect: Rect, id: Id) -> (Response, f32) {
 }
 
 fn draw_x(p: &Painter, c: Pos2, r: f32, col: Color32) {
-    let s = Stroke::new(1.8, col);
+    let s = Stroke::new(1.8_f32, col);
     p.line_segment([c + vec2(-r, -r), c + vec2(r, r)], s);
     p.line_segment([c + vec2(-r, r), c + vec2(r, -r)], s);
 }
 fn draw_plus(p: &Painter, c: Pos2, r: f32, col: Color32) {
-    let s = Stroke::new(1.8, col);
+    let s = Stroke::new(1.8_f32, col);
     p.line_segment([c + vec2(-r, 0.0), c + vec2(r, 0.0)], s);
     p.line_segment([c + vec2(0.0, -r), c + vec2(0.0, r)], s);
 }
 fn draw_check(p: &Painter, c: Pos2, r: f32, col: Color32) {
-    let s = Stroke::new(2.4, col);
+    let s = Stroke::new(2.4_f32, col);
     p.line_segment([c + vec2(-r, 0.0), c + vec2(-r * 0.3, r * 0.75)], s);
     p.line_segment([c + vec2(-r * 0.3, r * 0.75), c + vec2(r, -r * 0.65)], s);
 }
 fn draw_arrow_up(p: &Painter, c: Pos2, r: f32, col: Color32) {
-    let s = Stroke::new(2.2, col);
+    let s = Stroke::new(2.2_f32, col);
     p.line_segment([c + vec2(0.0, r), c + vec2(0.0, -r)], s);
     p.line_segment([c + vec2(-r * 0.75, -r * 0.2), c + vec2(0.0, -r)], s);
     p.line_segment([c + vec2(r * 0.75, -r * 0.2), c + vec2(0.0, -r)], s);
@@ -263,10 +263,10 @@ fn glass(p: &Painter, bg: &Bg, rect: Rect, rad: f32, k: f32) {
         Color32::from_white_alpha((16.0 * (1.0 - f) * k) as u8)
     });
     grain(p, bg, &pts, rect.min, (GRAIN_A as f32 * k) as u8);
-    p.add(Shape::closed_line(pts, Stroke::new(1.0, Color32::from_white_alpha((120.0 * k) as u8))));
+    p.add(Shape::closed_line(pts, Stroke::new(1.0_f32, Color32::from_white_alpha((120.0 * k) as u8))));
     p.add(Shape::closed_line(
         rounded_poly(rect.shrink(1.5), (rad - 1.5).max(0.0), 10),
-        Stroke::new(1.0, Color32::from_white_alpha((30.0 * k) as u8)),
+        Stroke::new(1.0_f32, Color32::from_white_alpha((30.0 * k) as u8)),
     ));
 }
 
@@ -1130,7 +1130,7 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str, id: Id) {
                 });
             });
             ui.add_space(4.0);
-            egui::ScrollArea::horizontal().id_source(id.with("sc")).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::horizontal().id_salt(id.with("sc")).auto_shrink([false, true]).show(ui, |ui| {
                 ui.add(
                     egui::Label::new(
                         RichText::new(code).monospace().size(13.0).color(Color32::from_rgb(222, 230, 247)),
@@ -1201,7 +1201,7 @@ fn md_ui(ui: &mut Ui, text: &str, col: Color32, salt: Id) {
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::hover());
             ui.painter().line_segment(
                 [pos2(r.left(), r.center().y), pos2(r.right(), r.center().y)],
-                Stroke::new(1.0, Color32::from_black_alpha(34)),
+                Stroke::new(1.0_f32, Color32::from_black_alpha(34)),
             );
             i += 1;
             continue;
@@ -1244,7 +1244,7 @@ fn md_ui(ui: &mut Ui, text: &str, col: Color32, salt: Id) {
                 .rounding(Rounding::same(10.0))
                 .inner_margin(Margin::symmetric(12.0, 8.0))
                 .show(ui, |ui| {
-                    egui::ScrollArea::horizontal().id_source(gid.with("s")).auto_shrink([false, true]).show(ui, |ui| {
+                    egui::ScrollArea::horizontal().id_salt(gid.with("s")).auto_shrink([false, true]).show(ui, |ui| {
                         egui::Grid::new(gid).spacing([18.0, 8.0]).show(ui, |ui| {
                             for (ri, r) in rows.iter().enumerate() {
                                 for c in r {
@@ -1401,7 +1401,7 @@ impl App {
             w.fg_stroke.color = INK;
         }
         v.selection.bg_fill = GREEN.gamma_multiply(0.35);
-        v.selection.stroke = Stroke::new(1.0, GREEN);
+        v.selection.stroke = Stroke::new(1.0_f32, GREEN);
         v.window_stroke = Stroke::NONE;
         cc.egui_ctx.set_visuals(v);
 
@@ -1764,10 +1764,10 @@ impl App {
                     let rad = 7.0 + h * 0.8;
                     let col = cols[i];
                     p.circle_filled(c, rad, col);
-                    p.circle_stroke(c, rad, Stroke::new(1.0, lerpc(col, Color32::WHITE, 0.0).gamma_multiply(0.6)));
+                    p.circle_stroke(c, rad, Stroke::new(1.0_f32, lerpc(col, Color32::WHITE, 0.0).gamma_multiply(0.6)));
                     if gh > 0.01 {
                         let g = lerpc(col, INK, 0.75).gamma_multiply(gh);
-                        let s = Stroke::new(1.5, g);
+                        let s = Stroke::new(1.5_f32, g);
                         match i {
                             0 => {
                                 p.line_segment([c + vec2(-3.0, 0.0), c + vec2(3.0, 0.0)], s);
@@ -1808,7 +1808,7 @@ impl App {
             let half = 9.0;
             let line = |center: Pos2, ang: f32, a: f32| {
                 let d = vec2(ang.cos(), ang.sin()) * half;
-                p.line_segment([center - d, center + d], Stroke::new(2.0, col.gamma_multiply(a)));
+                p.line_segment([center - d, center + d], Stroke::new(2.0_f32, col.gamma_multiply(a)));
             };
             let q = std::f32::consts::FRAC_PI_4;
             line(c + vec2(0.0, -6.0 * (1.0 - t)), t * q, 1.0);
@@ -1839,7 +1839,7 @@ impl App {
                 glass(ui.painter(), bg, rect, PANEL_R, 1.0);
                 let inner = rect.shrink2(vec2(14.0, 12.0));
                 let list = Rect::from_min_max(inner.min, pos2(inner.max.x, inner.max.y - BOT_H));
-                ui.allocate_ui_at_rect(list, |ui| {
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(list), |ui| {
                     ui.add_space(46.0);
                     if section_header(ui, "Projects", Id::new("sh_proj")) {
                         acts.push(Act::NewProject);
@@ -1925,7 +1925,7 @@ impl App {
                 let pp = ui.painter().clone();
                 pp.line_segment(
                     [pos2(bot.left() + 4.0, bot.top()), pos2(bot.right() - 4.0, bot.top())],
-                    Stroke::new(1.0, Color32::from_black_alpha(22)),
+                    Stroke::new(1.0_f32, Color32::from_black_alpha(22)),
                 );
                 pp.text(
                     pos2(bot.left() + 6.0, bot.top() + 20.0),
@@ -1940,7 +1940,7 @@ impl App {
                 let btn = Rect::from_min_size(pos2(bot.left(), bot.bottom() - 42.0), vec2(bot.width(), 40.0));
                 let (r, h) = hit(ui, btn, Id::new("bg_pick"));
                 pp.rect_filled(btn, Rounding::same(20.0), Color32::from_white_alpha((70.0 + h * 80.0) as u8));
-                pp.rect_stroke(btn, Rounding::same(20.0), Stroke::new(1.0, Color32::from_white_alpha(100)));
+                pp.rect_stroke(btn, Rounding::same(20.0), Stroke::new(1.0_f32, Color32::from_white_alpha(100)));
                 let tr = pp.text(
                     btn.center() + vec2(12.0, 0.0),
                     Align2::CENTER_CENTER,
@@ -1949,12 +1949,12 @@ impl App {
                     INK,
                 );
                 let ic = pos2(tr.left() - 17.0, btn.center().y);
-                let st = Stroke::new(1.4, INK);
+                let st = Stroke::new(1.4_f32, INK);
                 pp.rect_stroke(Rect::from_center_size(ic, vec2(16.0, 13.0)), Rounding::same(3.0), st);
                 pp.circle_filled(ic + vec2(3.5, -2.0), 1.6, INK);
                 pp.add(Shape::line(
                     vec![ic + vec2(-6.0, 4.0), ic + vec2(-2.0, -0.5), ic + vec2(1.0, 2.5), ic + vec2(3.0, 0.5), ic + vec2(6.0, 4.0)],
-                    Stroke::new(1.3, INK),
+                    Stroke::new(1.3_f32, INK),
                 ));
                 if r.clicked() {
                     acts.push(Act::PickBg);
@@ -2067,9 +2067,9 @@ impl App {
                 ui.painter().text(c - vec2(0.0, 12.0), Align2::CENTER_CENTER, head, FontId::new(22.0, bold_family()), fa(Color32::WHITE, 0.95));
                 ui.painter().text(c + vec2(0.0, 16.0), Align2::CENTER_CENTER, sub, FontId::proportional(13.5), fa(Color32::WHITE, 0.8));
             } else {
-                ui.allocate_ui_at_rect(mrect, |ui| {
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(mrect), |ui| {
                     egui::ScrollArea::vertical()
-                        .id_source(("msgs", chat_id))
+                        .id_salt(("msgs", chat_id))
                         .auto_shrink([false, false])
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
@@ -2086,7 +2086,7 @@ impl App {
             }
 
             glass(ui.painter(), bg, bar, 27.0, 1.0);
-            ui.allocate_ui_at_rect(bar.shrink2(vec2(10.0, 8.0)), |ui| {
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(10.0, 8.0))), |ui| {
                 ui.horizontal_centered(|ui| {
                     if model_chip(ui, &label, has_active).clicked() {
                         open_popup = true;
@@ -2266,8 +2266,8 @@ impl App {
                 );
             } else {
                 let ch = (cr.height() - 18.0).max(120.0);
-                ui.allocate_ui_at_rect(cr, |ui| {
-                    egui::ScrollArea::horizontal().id_source("cards").auto_shrink([false, false]).show(ui, |ui| {
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(cr), |ui| {
+                    egui::ScrollArea::horizontal().id_salt("cards").auto_shrink([false, false]).show(ui, |ui| {
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = 12.0;
                             for (pi, prov) in self.providers.iter().enumerate() {
@@ -2281,7 +2281,7 @@ impl App {
                                 let is_act = active.as_ref().map_or(false, |(a, _)| *a == pi);
                                 p.rect_filled(card, Rounding::same(16.0), Color32::from_white_alpha(70).gamma_multiply(ca));
                                 if is_act {
-                                    p.rect_stroke(card, Rounding::same(16.0), Stroke::new(1.5, fa(GREEN, ca)));
+                                    p.rect_stroke(card, Rounding::same(16.0), Stroke::new(1.5_f32, fa(GREEN, ca)));
                                 }
                                 p.text(
                                     pos2(card.left() + 14.0, card.top() + 20.0),
@@ -2308,10 +2308,10 @@ impl App {
                                     pos2(card.left() + 6.0, card.top() + 56.0),
                                     pos2(card.right() - 6.0, card.bottom() - 8.0),
                                 );
-                                ui.allocate_ui_at_rect(lr, |ui| {
+                                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(lr), |ui| {
                                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                                         egui::ScrollArea::vertical()
-                                            .id_source(("ml", pi))
+                                            .id_salt(("ml", pi))
                                             .auto_shrink([false, false])
                                             .show(ui, |ui| {
                                                 for m in &prov.models {
@@ -2433,7 +2433,7 @@ fn side_row_at(
         let c = pos2(rect.left() + 17.0, rect.center().y);
         let a = e * std::f32::consts::FRAC_PI_2;
         let rot = |x: f32, y: f32| c + vec2(x * a.cos() - y * a.sin(), x * a.sin() + y * a.cos());
-        let s = Stroke::new(1.8, INK);
+        let s = Stroke::new(1.8_f32, INK);
         p.line_segment([rot(-2.0, -4.0), rot(2.0, 0.0)], s);
         p.line_segment([rot(2.0, 0.0), rot(-2.0, 4.0)], s);
         tx += 18.0;
