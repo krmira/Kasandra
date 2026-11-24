@@ -41,7 +41,7 @@ const RED_DK: Color32 = Color32::from_rgb(196, 52, 58);
 const PROJ_ROW: f32 = 44.0; // sidebar row heights (a bit more air than before)
 const CHAT_ROW: f32 = 40.0;
 const BODY_SIZE: f32 = 15.0;
-const LINE_H: f32 = 23.0; // chat text line height (was egui's tight default)
+const LINE_H: f32 = 25.0; // chat text line height
 
 const KR_SERVICE: &str = "Kasandra";
 
@@ -270,6 +270,48 @@ fn glass(p: &Painter, bg: &Bg, rect: Rect, rad: f32, k: f32) {
     ));
 }
 
+/// Soft layered drop shadow.
+fn soft_shadow(p: &Painter, rect: Rect, rad: f32, a: f32) {
+    for i in 0..7 {
+        let g = (i + 1) as f32 * 2.0;
+        p.add(Shape::convex_polygon(
+            rounded_poly(rect.expand(g).translate(vec2(0.0, 5.0)), rad + g, 8),
+            Color32::from_black_alpha((5.0 * a) as u8),
+            Stroke::NONE,
+        ));
+    }
+}
+
+/// Additive radial glow that follows the mouse.
+fn glow(p: &Painter, c: Pos2, r: f32) {
+    use egui::epaint::{Vertex, WHITE_UV};
+    let rings = [(0.0_f32, 1.0_f32), (0.35, 0.62), (0.7, 0.22), (1.0, 0.0)];
+    let n = 56usize;
+    let col = |f: f32| Color32::from_rgba_premultiplied((55.0 * f) as u8, (95.0 * f) as u8, (140.0 * f) as u8, 0);
+    let mut m = egui::Mesh::default();
+    m.vertices.push(Vertex { pos: c, uv: WHITE_UV, color: col(1.0) });
+    for (k, (rr, f)) in rings.iter().enumerate().skip(1) {
+        for i in 0..n {
+            let a = i as f32 / n as f32 * std::f32::consts::TAU;
+            m.vertices.push(Vertex { pos: c + vec2(a.cos(), a.sin()) * r * rr, uv: WHITE_UV, color: col(*f) });
+        }
+        let base = 1 + (k - 1) * n;
+        for i in 0..n {
+            let (a, b) = (i, (i + 1) % n);
+            if k == 1 {
+                m.indices.extend_from_slice(&[0, (base + a) as u32, (base + b) as u32]);
+            } else {
+                let pb = base - n;
+                m.indices.extend_from_slice(&[
+                    (pb + a) as u32, (pb + b) as u32, (base + a) as u32,
+                    (pb + b) as u32, (base + b) as u32, (base + a) as u32,
+                ]);
+            }
+        }
+    }
+    p.add(Shape::mesh(m));
+}
+
 /// Pill slider: thin track, accent fill, white pill thumb.
 fn pill_slider(ui: &mut Ui, rect: Rect, id: Id, v: &mut f32, lo: f32, hi: f32) -> bool {
     let resp = ui.interact(rect, id, Sense::click_and_drag());
@@ -340,56 +382,39 @@ fn pixel_text(p: &Painter, pos: Pos2, text: &str, px: f32, col: Color32) {
 
 // ───────────────────────────── background ─────────────────────────────
 
-/// Procedural version of the silver/periwinkle reeded-glass reference, lightly blurred.
+/// Default wallpaper: light blue on the left fading through deep blue into near-black.
 fn procedural_bg() -> Vec<[f32; 3]> {
-    const W: usize = BG_W;
-    const H: usize = BG_H;
     let sm = |a: f32, b: f32, x: f32| {
         let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     };
-    let mix = |a: [f32; 3], b: [f32; 3], t: f32| {
-        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
-    };
-    let dark = [70.0, 78.0, 108.0];
-    let light = [182.0, 194.0, 228.0];
-    let mut buf = vec![[0f32; 3]; W * H];
-    for y in 0..H {
-        let v = y as f32 / (H - 1) as f32;
-        for x in 0..W {
-            let u = x as f32 / (W - 1) as f32;
-            let mut c = mix(dark, light, sm(0.0, 0.95, u));
-            let dx = u * 1.78;
-            let d = (dx * dx + (v - 0.42) * (v - 0.42)).sqrt();
-            c = mix(c, [52.0, 58.0, 88.0], (-(d / 0.5).powi(2)).exp() * 0.75);
-            let d2 = (dx * dx + (v - 0.95) * (v - 0.95)).sqrt();
-            c = mix(c, [176.0, 180.0, 214.0], (-(d2 / 0.55).powi(2)).exp() * 0.6);
-            c = mix(c, [126.0, 136.0, 168.0], sm(0.7, 1.0, v) * sm(0.45, 1.0, u) * 0.55);
-
-            let s = (v - 0.5) * 2.0;
-            let bound = 0.50 + 0.44 * (1.0 - s * s);
-            let k = sm(bound + 0.03, bound - 0.12, u) * sm(0.16, 0.24, u);
-            if k > 0.0 {
-                let p = u * 70.0 + 0.35 * (v * 5.0 + u * 4.0).sin();
-                let rb = 0.45 + 0.55 * sm(0.35, 0.9, v);
-                let mut out = c;
-                for ch in 0..3 {
-                    let off = [0.07, 0.0, -0.07][ch] * rb;
-                    let f = (p + off).rem_euclid(1.0);
-                    let band = 0.5 - 0.5 * (f * std::f32::consts::TAU).cos();
-                    let hl = band.powi(4);
-                    let shade = 1.0 - 0.30 * (1.0 - band);
-                    let lit = 0.35 + 0.65 * sm(0.2, 0.9, u);
-                    let target = [236.0, 242.0, 255.0][ch];
-                    out[ch] = c[ch] * (1.0 - k * (1.0 - shade)) + k * hl * lit * (target - c[ch]) * 0.85;
+    let stops: [(f32, [f32; 3]); 5] = [
+        (0.0, [190.0, 212.0, 236.0]),
+        (0.16, [104.0, 150.0, 196.0]),
+        (0.34, [28.0, 84.0, 132.0]),
+        (0.58, [9.0, 24.0, 46.0]),
+        (1.0, [6.0, 9.0, 20.0]),
+    ];
+    let mut buf = vec![[0f32; 3]; BG_W * BG_H];
+    for y in 0..BG_H {
+        let v = y as f32 / (BG_H - 1) as f32;
+        let edge = ((v * 2.0 - 1.0).abs()).powi(3);
+        for x in 0..BG_W {
+            let u = x as f32 / (BG_W - 1) as f32;
+            let mut c = stops[4].1;
+            for w in stops.windows(2) {
+                if u <= w[1].0 {
+                    let t = sm(w[0].0, w[1].0, u);
+                    c = [0, 1, 2].map(|i| w[0].1[i] + (w[1].1[i] - w[0].1[i]) * t);
+                    break;
                 }
-                c = out;
             }
-            buf[y * W + x] = c;
+            let vig = 1.0 - 0.4 * edge;
+            let n = ((x as u32).wrapping_mul(1973) ^ (y as u32).wrapping_mul(9277)).wrapping_mul(2654435761) >> 24;
+            let dither = n as f32 / 255.0 * 3.0 - 1.5; // kills banding
+            buf[y * BG_W + x] = c.map(|k| k * vig + dither);
         }
     }
-    let mut buf = buf;
-    box_blur_fast(&mut buf, W, H, 2);
     buf
 }
 
@@ -1167,7 +1192,7 @@ fn list_item(ui: &mut Ui, level: usize, marker: Option<&str>, text: &str, col: C
 
 /// Block-level markdown: headings, paragraphs, bullet/numbered lists, quotes, tables, rules, code fences.
 fn md_ui(ui: &mut Ui, text: &str, col: Color32, salt: Id) {
-    ui.spacing_mut().item_spacing.y = 4.0;
+    ui.spacing_mut().item_spacing.y = 6.0;
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0usize;
     while i < lines.len() {
@@ -1191,7 +1216,7 @@ fn md_ui(ui: &mut Ui, text: &str, col: Color32, salt: Id) {
         }
 
         if tr.is_empty() {
-            ui.add_space(6.0);
+            ui.add_space(9.0);
             i += 1;
             continue;
         }
@@ -2067,20 +2092,29 @@ impl App {
                 ui.painter().text(c - vec2(0.0, 12.0), Align2::CENTER_CENTER, head, FontId::new(22.0, bold_family()), fa(Color32::WHITE, 0.95));
                 ui.painter().text(c + vec2(0.0, 16.0), Align2::CENTER_CENTER, sub, FontId::proportional(13.5), fa(Color32::WHITE, 0.8));
             } else {
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(mrect), |ui| {
+                // scroll area spans nearly the full width so the bar sits at the right edge;
+                // messages stay in a centered column
+                let srect = Rect::from_min_max(pos2(area.left() + 6.0, mrect.top()), pos2(area.right() - 6.0, mrect.bottom()));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(srect), |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt(("msgs", chat_id))
                         .auto_shrink([false, false])
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            ui.add_space(4.0);
-                            for (mi, m) in self.chats[self.cur].msgs.iter().enumerate() {
-                                bubble(ui, m, Id::new(("msg", chat_id, mi)));
-                            }
-                            if pending {
-                                typing(ui);
-                            }
-                            ui.add_space(6.0);
+                            let avail = ui.available_width();
+                            let pad = ((avail - cw) / 2.0).max(0.0);
+                            let c = ui.cursor();
+                            let col = Rect::from_min_size(pos2(c.left() + pad, c.top()), vec2(cw.min(avail), 100000.0));
+                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(col), |ui| {
+                                ui.add_space(8.0);
+                                for (mi, m) in self.chats[self.cur].msgs.iter().enumerate() {
+                                    bubble(ui, m, Id::new(("msg", chat_id, mi)));
+                                }
+                                if pending {
+                                    typing(ui);
+                                }
+                                ui.add_space(10.0);
+                            });
                         });
                 });
             }
@@ -2265,11 +2299,14 @@ impl App {
                     fa(muted(), t),
                 );
             } else {
-                let ch = (cr.height() - 18.0).max(120.0);
+                let ch = (cr.height() - 44.0).max(120.0);
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(cr), |ui| {
                     egui::ScrollArea::horizontal().id_salt("cards").auto_shrink([false, false]).show(ui, |ui| {
+                        ui.add_space(8.0); // room for the shadow
+                        let cp = ui.painter().clone(); // clipped to the scroll area
                         ui.horizontal_top(|ui| {
-                            ui.spacing_mut().item_spacing.x = 12.0;
+                            ui.spacing_mut().item_spacing.x = 14.0;
+                            ui.add_space(6.0);
                             for (pi, prov) in self.providers.iter().enumerate() {
                                 let born = ((now - prov.born) / 0.25).clamp(0.0, 1.0) as f32;
                                 if born < 1.0 {
@@ -2279,18 +2316,19 @@ impl App {
                                 let (slot, _) = ui.allocate_exact_size(vec2(184.0, ch), Sense::hover());
                                 let card = slot.translate(vec2(0.0, (1.0 - ease(born)) * 14.0));
                                 let is_act = active.as_ref().map_or(false, |(a, _)| *a == pi);
-                                p.rect_filled(card, Rounding::same(16.0), Color32::from_white_alpha(70).gamma_multiply(ca));
+                                soft_shadow(&cp, card, 16.0, ca);
+                                cp.rect_filled(card, Rounding::same(16.0), Color32::from_white_alpha(120).gamma_multiply(ca));
                                 if is_act {
-                                    p.rect_stroke(card, Rounding::same(16.0), Stroke::new(1.5_f32, fa(GREEN, ca)));
+                                    cp.rect_stroke(card, Rounding::same(16.0), Stroke::new(1.5_f32, fa(GREEN, ca)));
                                 }
-                                p.text(
+                                cp.text(
                                     pos2(card.left() + 14.0, card.top() + 20.0),
                                     Align2::LEFT_CENTER,
                                     trunc(&prov.name, 15),
                                     FontId::proportional(17.0),
                                     fa(INK, ca),
                                 );
-                                p.text(
+                                cp.text(
                                     pos2(card.left() + 14.0, card.top() + 40.0),
                                     Align2::LEFT_CENTER,
                                     format!("{} models", prov.models.len()),
@@ -2299,8 +2337,8 @@ impl App {
                                 );
                                 let rr = Rect::from_center_size(pos2(card.right() - 18.0, card.top() + 20.0), vec2(22.0, 22.0));
                                 let (r, h) = hit(ui, rr, Id::new(("rm", pi)));
-                                p.circle_filled(rr.center(), 11.0, Color32::from_white_alpha((h * 120.0) as u8).gamma_multiply(ca));
-                                draw_x(&p, rr.center(), 3.5, fa(muted(), ca));
+                                cp.circle_filled(rr.center(), 11.0, Color32::from_white_alpha((h * 120.0) as u8).gamma_multiply(ca));
+                                draw_x(&cp, rr.center(), 3.5, fa(muted(), ca));
                                 if r.clicked() {
                                     remove = Some(pi);
                                 }
@@ -2309,35 +2347,62 @@ impl App {
                                     pos2(card.right() - 6.0, card.bottom() - 8.0),
                                 );
                                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(lr), |ui| {
-                                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                                        egui::ScrollArea::vertical()
-                                            .id_salt(("ml", pi))
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                for m in &prov.models {
-                                                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
-                                                    let sel = active.as_ref().map_or(false, |(a, b)| *a == pi && b == m);
-                                                    let (r, h) = hit(ui, row, Id::new(("m", pi, m.as_str())));
-                                                    let fill = if sel {
-                                                        fa(GREEN, ca)
+                                    egui::ScrollArea::vertical()
+                                        .id_salt(("ml", pi))
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            for m in &prov.models {
+                                                let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+                                                let sel = active.as_ref().map_or(false, |(a, b)| *a == pi && b == m);
+                                                let mid = Id::new(("m", pi, m.as_str()));
+                                                let (r, h) = hit(ui, row, mid);
+                                                let fill = if sel {
+                                                    fa(GREEN, ca)
+                                                } else {
+                                                    Color32::from_white_alpha((h * 110.0) as u8).gamma_multiply(ca)
+                                                };
+                                                ui.painter().rect_filled(row, Rounding::same(8.0), fill);
+
+                                                let col = fa(if sel { Color32::WHITE } else { INK }, ca);
+                                                let avail = row.width() - 20.0;
+                                                let full = ui.painter().layout_no_wrap(m.clone(), FontId::proportional(12.5), col);
+                                                let over = (full.size().x - avail).max(0.0);
+                                                let clip = Rect::from_min_max(
+                                                    pos2(row.left() + 8.0, row.top()),
+                                                    pos2(row.right() - 6.0, row.bottom()),
+                                                )
+                                                .intersect(ui.clip_rect());
+                                                let tp = ui.painter().with_clip_rect(clip);
+                                                let ty = row.center().y - full.size().y / 2.0;
+
+                                                if r.hovered() && over > 0.0 {
+                                                    // marquee: pause, scroll, pause, scroll back
+                                                    let t0 = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(mid.with("t0"), || now));
+                                                    let (speed, pause) = (75.0_f64, 0.4_f64);
+                                                    let (o, dur) = (over as f64, over as f64 / 75.0);
+                                                    let ph = (now - t0) % (2.0 * (dur + pause));
+                                                    let off = if ph < pause {
+                                                        0.0
+                                                    } else if ph < pause + dur {
+                                                        (ph - pause) * speed
+                                                    } else if ph < 2.0 * pause + dur {
+                                                        o
                                                     } else {
-                                                        Color32::from_white_alpha((h * 110.0) as u8).gamma_multiply(ca)
+                                                        o - (ph - 2.0 * pause - dur) * speed
                                                     };
-                                                    ui.painter().rect_filled(row, Rounding::same(8.0), fill);
-                                                    ui.painter().text(
-                                                        row.left_center() + vec2(10.0, 0.0),
-                                                        Align2::LEFT_CENTER,
-                                                        trunc(m, 22),
-                                                        FontId::proportional(12.5),
-                                                        fa(if sel { Color32::WHITE } else { INK }, ca),
-                                                    );
-                                                    if r.clicked() {
-                                                        choose = Some((pi, m.clone()));
-                                                    }
-                                                    r.on_hover_text(m.as_str());
+                                                    tp.galley(pos2(row.left() + 10.0 - off as f32, ty), full, col);
+                                                    ui.ctx().request_repaint();
+                                                } else {
+                                                    ui.data_mut(|d| d.remove_temp::<f64>(mid.with("t0")));
+                                                    let shown = if over > 0.0 { trunc(m, 22) } else { m.clone() };
+                                                    let g = ui.painter().layout_no_wrap(shown, FontId::proportional(12.5), col);
+                                                    tp.galley(pos2(row.left() + 10.0, ty), g, col);
                                                 }
-                                            });
-                                    });
+                                                if r.clicked() {
+                                                    choose = Some((pi, m.clone()));
+                                                }
+                                            }
+                                        });
                                 });
                             }
                         });
@@ -2481,7 +2546,7 @@ fn model_chip(ui: &mut Ui, label: &str, on: bool) -> Response {
 }
 
 fn bubble(ui: &mut Ui, m: &Msg, salt: Id) {
-    let maxw = (ui.available_width() * 0.84 - 32.0).max(120.0);
+    let maxw = (ui.available_width() * 0.84 - 36.0).max(120.0);
     let layout = if m.user { Layout::right_to_left(Align::TOP) } else { Layout::left_to_right(Align::TOP) };
     ui.with_layout(layout, |ui| {
         ui.vertical(|ui| {
@@ -2495,7 +2560,7 @@ fn bubble(ui: &mut Ui, m: &Msg, salt: Id) {
             egui::Frame::none()
                 .fill(fill)
                 .rounding(Rounding::same(18.0))
-                .inner_margin(Margin::symmetric(16.0, 12.0))
+                .inner_margin(Margin::symmetric(18.0, 14.0))
                 .show(ui, |ui| {
                     ui.set_max_width(maxw);
                     if m.user || m.err {
@@ -2533,7 +2598,7 @@ fn bubble(ui: &mut Ui, m: &Msg, salt: Id) {
             }
         });
     });
-    ui.add_space(14.0);
+    ui.add_space(22.0);
 }
 
 fn typing(ui: &mut Ui) {
@@ -2583,6 +2648,18 @@ impl eframe::App for App {
         };
         let painter = ctx.layer_painter(egui::LayerId::background());
         tex_poly(&painter, &bg, bg.sharp, &rounded_poly(screen, bg.win_r, 12), Color32::WHITE);
+
+        // mouse-reactive glow on the wallpaper (eases toward the pointer)
+        let gid = Id::new("glow_pos");
+        let prev: Pos2 = ctx.data(|d| d.get_temp(gid)).unwrap_or(screen.center());
+        let tgt = ctx.pointer_hover_pos().unwrap_or(prev);
+        let dt = ctx.input(|i| i.stable_dt).min(0.05);
+        let cur = prev + (tgt - prev) * (1.0 - (-dt * 6.0).exp());
+        ctx.data_mut(|d| d.insert_temp(gid, cur));
+        if (tgt - cur).length() > 0.5 {
+            ctx.request_repaint();
+        }
+        glow(&painter.with_clip_rect(screen), cur, 380.0);
 
         let side_t = ease(ctx.animate_bool_with_time(Id::new("side_t"), self.sidebar, 0.17));
         self.chat_ui(ctx, side_t, &bg);
