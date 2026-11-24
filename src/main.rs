@@ -576,9 +576,48 @@ struct Provider {
     born: f64,
 }
 
-fn detect(input: &str) -> Result<Provider, String> {
-    let input = input.trim();
-    if input.is_empty() {
+/// Every provider we know how to talk to: (kind, name, base url, key prefixes that identify it).
+const PROVIDERS: &[(Kind, &str, &str, &[&str])] = &[
+    (Kind::Anthropic, "Anthropic", "https://api.anthropic.com/v1", &["sk-ant-"]),
+    (Kind::Gemini, "Google Gemini", "https://generativelanguage.googleapis.com/v1beta", &["AIza", "AQ."]),
+    (Kind::OpenAi, "Groq", "https://api.groq.com/openai/v1", &["gsk_"]),
+    (Kind::OpenAi, "xAI", "https://api.x.ai/v1", &["xai-"]),
+    (Kind::OpenAi, "Cerebras", "https://api.cerebras.ai/v1", &["csk-"]),
+    (Kind::OpenAi, "NVIDIA", "https://integrate.api.nvidia.com/v1", &["nvapi-"]),
+    (Kind::OpenAi, "Fireworks", "https://api.fireworks.ai/inference/v1", &["fw_"]),
+    (Kind::OpenAi, "OpenAI", "https://api.openai.com/v1", &["sk-proj-", "sk-svcacct-", "sk-"]),
+    (Kind::OpenAi, "Mistral", "https://api.mistral.ai/v1", &[]),
+    (Kind::OpenAi, "DeepSeek", "https://api.deepseek.com/v1", &["sk-"]),
+    (Kind::OpenAi, "Together", "https://api.together.xyz/v1", &[]),
+    (Kind::OpenAi, "SambaNova", "https://api.sambanova.ai/v1", &[]),
+    (Kind::OpenAi, "Moonshot", "https://api.moonshot.ai/v1", &["sk-"]),
+    // these two list models without a key, so they go last: a "success" there proves little
+    (Kind::OpenAi, "Hugging Face", "https://router.huggingface.co/v1", &["hf_"]),
+    (Kind::OpenAi, "OpenRouter", "https://openrouter.ai/api/v1", &["sk-or-"]),
+];
+
+/// Turn whatever was pasted into a clean key: strips quotes, "Bearer ", "export", and NAME=value wrappers.
+fn clean_key(input: &str) -> String {
+    let mut s = input.trim().trim_matches(|c: char| c == '"' || c == '\'' || c == '`').trim().to_string();
+    if let Some(r) = s.strip_prefix("export ") {
+        s = r.trim().to_string();
+    }
+    if let Some((name, val)) = s.split_once('=') {
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+            s = val.trim().trim_matches(|c: char| c == '"' || c == '\'').to_string();
+        }
+    }
+    if s.get(..7).map_or(false, |x| x.eq_ignore_ascii_case("bearer ")) {
+        s = s[7..].trim().to_string();
+    }
+    s
+}
+
+/// Returns the providers to try, best guess first. Prefix matches go first (longest prefix wins),
+/// then every other known provider, so keys with an unknown or new format still get identified by probing.
+fn detect(input: &str) -> Result<(Vec<Provider>, bool), String> {
+    let key = clean_key(input);
+    if key.is_empty() {
         return Err("Paste an API key first".into());
     }
     let mk = |kind, name: &str, base: &str, key: &str| Provider {
@@ -590,31 +629,28 @@ fn detect(input: &str) -> Result<Provider, String> {
         born: 0.0,
     };
     // custom OpenAI-compatible endpoint: "<base url> <key>"
-    if let Some((b, k)) = input.split_once(char::is_whitespace) {
+    if let Some((b, k)) = key.split_once(char::is_whitespace) {
         if b.starts_with("http") {
             let host = b.split("//").nth(1).unwrap_or(b).split('/').next().unwrap_or(b);
-            return Ok(mk(Kind::OpenAi, host, b, k.trim()));
+            return Ok((vec![mk(Kind::OpenAi, host, b, k.trim())], true));
         }
         return Err("Expected just a key, or: https://host/v1 <key>".into());
     }
-    let k = input;
-    Ok(if k.starts_with("sk-ant-") {
-        mk(Kind::Anthropic, "Anthropic", "https://api.anthropic.com/v1", k)
-    } else if k.starts_with("sk-or-") {
-        mk(Kind::OpenAi, "OpenRouter", "https://openrouter.ai/api/v1", k)
-    } else if k.starts_with("gsk_") {
-        mk(Kind::OpenAi, "Groq", "https://api.groq.com/openai/v1", k)
-    } else if k.starts_with("xai-") {
-        mk(Kind::OpenAi, "xAI", "https://api.x.ai/v1", k)
-    } else if k.starts_with("csk-") {
-        mk(Kind::OpenAi, "Cerebras", "https://api.cerebras.ai/v1", k)
-    } else if k.starts_with("AIza") {
-        mk(Kind::Gemini, "Google Gemini", "https://generativelanguage.googleapis.com/v1beta", k)
-    } else if k.starts_with("sk-") {
-        mk(Kind::OpenAi, "OpenAI", "https://api.openai.com/v1", k)
-    } else {
-        return Err("Unknown key format. For other providers paste: https://host/v1 <key>".into());
-    })
+    let mut scored: Vec<(usize, usize)> = vec![]; // (prefix length, index)
+    for (i, (_, _, _, prefixes)) in PROVIDERS.iter().enumerate() {
+        if let Some(l) = prefixes.iter().filter(|p| key.starts_with(**p)).map(|p| p.len()).max() {
+            scored.push((l, i));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let matched = !scored.is_empty();
+    let mut order: Vec<usize> = scored.iter().map(|x| x.1).collect();
+    for i in 0..PROVIDERS.len() {
+        if !order.contains(&i) {
+            order.push(i);
+        }
+    }
+    Ok((order.into_iter().map(|i| mk(PROVIDERS[i].0, PROVIDERS[i].1, PROVIDERS[i].2, &key)).collect(), matched))
 }
 
 fn agent() -> ureq::Agent {
@@ -637,7 +673,7 @@ fn post_json(req: ureq::Request, body: Value) -> Result<Value, String> {
 }
 
 fn fetch_models(p: &Provider) -> Result<Vec<String>, String> {
-    let a = agent();
+    let a = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(15)).build();
     let v = match p.kind {
         Kind::OpenAi => get_json(
             a.get(&format!("{}/models", p.base)).set("Authorization", &format!("Bearer {}", p.key)),
@@ -932,12 +968,36 @@ impl App {
         }
         match detect(&self.key_input) {
             Err(e) => self.add_err = Some(e),
-            Ok(p) => {
+            Ok((cands, matched)) => {
                 self.adding = true;
                 self.add_err = None;
                 let (tx, ctx) = (self.tx.clone(), ctx.clone());
                 std::thread::spawn(move || {
-                    let r = fetch_models(&p).map(|m| Provider { models: m, ..p.clone() });
+                    let n = cands.len();
+                    let mut first_err: Option<String> = None;
+                    let mut found: Option<Provider> = None;
+                    for p in cands {
+                        match fetch_models(&p) {
+                            Ok(m) if !m.is_empty() => {
+                                found = Some(Provider { models: m, ..p });
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                if first_err.is_none() {
+                                    first_err = Some(e);
+                                }
+                            }
+                        }
+                    }
+                    let r = match found {
+                        Some(p) => Ok(p),
+                        None if matched && n > 1 => Err(first_err.unwrap_or_else(|| "Key was rejected".into())),
+                        None if n == 1 => Err(first_err.unwrap_or_else(|| "Key was rejected".into())),
+                        None => Err(format!(
+                            "No known provider accepted this key (tried {n}). For others paste: https://host/v1 <key>"
+                        )),
+                    };
                     let _ = tx.send(Ev::Added(r));
                     ctx.request_repaint();
                 });
