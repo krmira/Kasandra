@@ -653,6 +653,23 @@ fn detect(input: &str) -> Result<(Vec<Provider>, bool), String> {
     Ok((order.into_iter().map(|i| mk(PROVIDERS[i].0, PROVIDERS[i].1, PROVIDERS[i].2, &key)).collect(), matched))
 }
 
+/// Default model for a freshly added key: a good general chat model, not just the first one alphabetically
+/// (which on Groq is `allam-2-7b`, an Arabic-focused model).
+fn pick_default(models: &[String]) -> Option<String> {
+    let bad = ["allam", "whisper", "guard", "tts", "embed", "orpheus", "image", "vision-preview", "moderation", "aqa", "imagen", "veo"];
+    let good = [
+        "llama-3.3-70b", "gpt-4o", "gpt-4.1", "gpt-5", "claude-sonnet", "claude-3-5-sonnet", "gemini-2.5-flash",
+        "gemini-2.5-pro", "gemini-2.0-flash", "deepseek-chat", "mistral-large", "grok", "llama", "gpt", "claude", "gemini",
+    ];
+    let ok: Vec<&String> = models.iter().filter(|m| !bad.iter().any(|b| m.to_lowercase().contains(b))).collect();
+    for g in good {
+        if let Some(m) = ok.iter().find(|m| m.to_lowercase().contains(g)) {
+            return Some((*m).clone());
+        }
+    }
+    ok.first().map(|m| (*m).clone()).or_else(|| models.first().cloned())
+}
+
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(120)).build()
 }
@@ -706,6 +723,15 @@ fn fetch_models(p: &Provider) -> Result<Vec<String>, String> {
             }
         }
     }
+    // hide Arabic-only models and anything that isn't a text chat model (speech, audio, safety, embeddings, images)
+    let skip = [
+        "allam", "arabic", "orpheus", "whisper", "tts", "speech", "audio", "guard", "embed", "moderation", "rerank",
+        "imagen", "image", "veo", "aqa", "transcribe", "realtime", "dall-e", "playai",
+    ];
+    out.retain(|m| {
+        let l = m.to_lowercase();
+        !skip.iter().any(|w| l.contains(w))
+    });
     out.sort();
     out.dedup();
     if out.is_empty() {
@@ -715,15 +741,16 @@ fn fetch_models(p: &Provider) -> Result<Vec<String>, String> {
     }
 }
 
+/// Sent with every request so every model, from every provider, answers in English only.
+const SYSTEM_PROMPT: &str = "You must reply in English only, no matter what language the user writes in. Never use Arabic or any other non-English language in your replies.";
+
 fn chat_call(p: &Provider, model: &str, h: &[(bool, String)]) -> Result<String, String> {
     let a = agent();
     let empty = || "Empty response".to_string();
     match p.kind {
         Kind::OpenAi => {
-            let msgs: Vec<Value> = h
-                .iter()
-                .map(|(u, t)| json!({"role": if *u {"user"} else {"assistant"}, "content": t}))
-                .collect();
+            let mut msgs: Vec<Value> = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
+            msgs.extend(h.iter().map(|(u, t)| json!({"role": if *u {"user"} else {"assistant"}, "content": t})));
             let v = post_json(
                 a.post(&format!("{}/chat/completions", p.base))
                     .set("Authorization", &format!("Bearer {}", p.key)),
@@ -740,7 +767,7 @@ fn chat_call(p: &Provider, model: &str, h: &[(bool, String)]) -> Result<String, 
                 a.post(&format!("{}/messages", p.base))
                     .set("x-api-key", &p.key)
                     .set("anthropic-version", "2023-06-01"),
-                json!({"model": model, "max_tokens": 4096, "messages": msgs}),
+                json!({"model": model, "max_tokens": 4096, "system": SYSTEM_PROMPT, "messages": msgs}),
             )?;
             v["content"][0]["text"].as_str().map(str::to_string).ok_or_else(empty)
         }
@@ -752,7 +779,7 @@ fn chat_call(p: &Provider, model: &str, h: &[(bool, String)]) -> Result<String, 
             let v = post_json(
                 a.post(&format!("{}/models/{}:generateContent", p.base, model))
                     .set("x-goog-api-key", &p.key),
-                json!({ "contents": contents }),
+                json!({ "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]}, "contents": contents }),
             )?;
             v["candidates"][0]["content"]["parts"][0]["text"].as_str().map(str::to_string).ok_or_else(empty)
         }
@@ -871,7 +898,7 @@ impl App {
                     self.adding = false;
                     self.key_input.clear();
                     p.born = ctx.input(|i| i.time);
-                    let first = p.models.first().cloned();
+                    let first = pick_default(&p.models);
                     let idx = if let Some(i) = self.providers.iter().position(|q| q.key == p.key) {
                         self.providers[i] = p;
                         i
