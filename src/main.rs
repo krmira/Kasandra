@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"] // no console window on Windows
+
 // Kasandra - a tiny multi-provider chat client. One file, egui.
 // Providers: OpenAI-compatible (OpenAI, Groq, OpenRouter, xAI, Cerebras, custom), Anthropic, Gemini.
 
@@ -45,7 +47,7 @@ fn trunc(s: &str, n: usize) -> String {
 /// Clickable rect with an animated hover value (0..1).
 fn hit(ui: &mut Ui, rect: Rect, id: Id) -> (Response, f32) {
     let r = ui.interact(rect, id, Sense::click());
-    let h = ui.ctx().animate_bool_with_time(id.with("hover"), r.hovered(), 0.12);
+    let h = ui.ctx().animate_bool_with_time(id.with("hover"), r.hovered(), 0.07);
     if r.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
@@ -664,15 +666,15 @@ impl App {
                 pixel_text(&p, pos2(rect.left() + 18.0, ty + 1.0), "Kasandra", px, Color32::from_black_alpha(70));
                 pixel_text(&p, pos2(rect.left() + 18.0, ty), "Kasandra", px, Color32::from_rgb(244, 247, 255));
 
-                // orbs: minimize (ice violet), maximize (green), close (rose)
+                // orbs: minimize (yellow), maximize (green), close (red)
                 let cy = rect.center().y;
                 let xs = [rect.right() - 68.0, rect.right() - 44.0, rect.right() - 20.0];
-                let cols = [Color32::from_rgb(150, 158, 235), GREEN, Color32::from_rgb(240, 98, 126)];
+                let cols = [Color32::from_rgb(254, 188, 46), Color32::from_rgb(40, 200, 64), Color32::from_rgb(255, 95, 87)];
                 let group = Rect::from_min_max(pos2(xs[0] - 12.0, cy - 12.0), pos2(xs[2] + 12.0, cy + 12.0));
                 let gh = ctx.animate_bool_with_time(
                     Id::new("orbs_h"),
                     ctx.pointer_hover_pos().map_or(false, |q| group.contains(q)),
-                    0.12,
+                    0.07,
                 );
                 for (i, cx) in xs.iter().enumerate() {
                     let c = pos2(*cx, cy);
@@ -681,7 +683,6 @@ impl App {
                     let col = cols[i];
                     p.circle_filled(c, rad, col);
                     p.circle_stroke(c, rad, Stroke::new(1.0, lerpc(col, Color32::WHITE, 0.0).gamma_multiply(0.6)));
-                    p.circle_filled(c + vec2(-1.8, -2.4), 2.6, Color32::from_white_alpha(80));
                     if gh > 0.01 {
                         let g = lerpc(col, INK, 0.75).gamma_multiply(gh);
                         let s = Stroke::new(1.5, g);
@@ -767,7 +768,7 @@ impl App {
                                 ui.label(RichText::new("  Press + to add a project folder").size(12.0).color(muted()));
                             }
                             for (pi, pr) in self.projects.iter().enumerate() {
-                                let e = ease(ui.ctx().animate_bool_with_time(Id::new(("pe", pi)), pr.open, 0.22));
+                                let e = ease(ui.ctx().animate_bool_with_time(Id::new(("pe", pi)), pr.open, 0.14));
                                 let w = ui.available_width();
                                 let (row, _) = ui.allocate_exact_size(vec2(w, 38.0), Sense::hover());
                                 let p = ui.painter().clone();
@@ -926,7 +927,7 @@ impl App {
 
     // ───────────── API popup ─────────────
     fn popup_ui(&mut self, ctx: &Context, bg: &Bg) {
-        let t = ease(ctx.animate_bool_with_time(Id::new("popup_t"), self.popup, 0.16));
+        let t = ease(ctx.animate_bool_with_time(Id::new("popup_t"), self.popup, 0.10));
         if t < 0.002 {
             return;
         }
@@ -1019,7 +1020,7 @@ impl App {
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = 12.0;
                             for (pi, prov) in self.providers.iter().enumerate() {
-                                let born = ((now - prov.born) / 0.4).clamp(0.0, 1.0) as f32;
+                                let born = ((now - prov.born) / 0.25).clamp(0.0, 1.0) as f32;
                                 if born < 1.0 {
                                     ui.ctx().request_repaint();
                                 }
@@ -1156,7 +1157,7 @@ fn side_row_at(
     let (resp, h) = hit(ui, hit_rect, id);
     let body = rect.shrink2(vec2(0.0, 1.0));
     let fill = if selected {
-        GREEN.gamma_multiply(0.24)
+        Color32::from_black_alpha(34)
     } else {
         Color32::from_white_alpha((h * 110.0) as u8)
     };
@@ -1165,7 +1166,7 @@ fn side_row_at(
         p.rect_filled(
             Rect::from_min_size(pos2(body.left() + 3.0 + indent - 10.0, body.top() + 9.0), vec2(3.0, body.height() - 18.0)),
             Rounding::same(2.0),
-            GREEN,
+            Color32::from_gray(110),
         );
     }
     let mut tx = rect.left() + 14.0 + indent;
@@ -1278,7 +1279,7 @@ impl eframe::App for App {
         let painter = ctx.layer_painter(egui::LayerId::background());
         tex_poly(&painter, &bg, bg.sharp, &rounded_poly(screen, bg.win_r, 12), Color32::WHITE);
 
-        let side_t = ease(ctx.animate_bool_with_time(Id::new("side_t"), self.sidebar, 0.30));
+        let side_t = ease(ctx.animate_bool_with_time(Id::new("side_t"), self.sidebar, 0.17));
         self.chat_ui(ctx, side_t, &bg);
         self.sidebar_ui(ctx, side_t, &bg);
         self.titlebar(ctx);
