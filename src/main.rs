@@ -15,8 +15,9 @@ const TITLE_H: f32 = 34.0;
 const SIDEBAR_W: f32 = 290.0;
 const WIN_R: f32 = 18.0; // window corner radius
 const PANEL_R: f32 = 20.0; // glass panel radius
-const GLASS_A: f32 = 96.0; // base white tint of the acrylic (top is lighter, bottom darker)
-const GRAIN_A: u8 = 15; // acrylic noise strength (0 = off)
+const GLASS_A: f32 = 77.0; // 30% white tint over the frosted wallpaper; // base white tint of the acrylic (top is lighter, bottom darker)
+const GRAIN_A: u8 = 0; // acrylic noise strength (0 = off; it looked speckled, so it is disabled)
+const ICO: &[u8] = include_bytes!("../kasandra.ico");
 const ACCENT: Color32 = Color32::from_rgb(10, 140, 255); // slider fill, same blue as the reference theme
 const BOT_H: f32 = 118.0; // height of the background controls at the bottom of the sidebar
 const BLUR_MAX: f32 = 14.0;
@@ -234,12 +235,12 @@ fn glass(p: &Painter, bg: &Bg, rect: Rect, rad: f32, k: f32) {
     let h = (b - t).max(1.0);
     fan(p, egui::TextureId::default(), &pts, |_| egui::epaint::WHITE_UV, |q| {
         let f = ((q.y - t) / h).clamp(0.0, 1.0);
-        Color32::from_white_alpha(((GLASS_A + 20.0 - 40.0 * f) * k) as u8)
+        Color32::from_white_alpha(((GLASS_A + 8.0 - 16.0 * f) * k) as u8)
     });
     // 3. specular sheen fading out over the top half
     fan(p, egui::TextureId::default(), &pts, |_| egui::epaint::WHITE_UV, |q| {
         let f = ((q.y - t) / (h * 0.5)).clamp(0.0, 1.0);
-        Color32::from_white_alpha((36.0 * (1.0 - f) * k) as u8)
+        Color32::from_white_alpha((16.0 * (1.0 - f) * k) as u8)
     });
     // 4. noise
     grain(p, bg, &pts, rect.min, (GRAIN_A as f32 * k) as u8);
@@ -402,6 +403,18 @@ fn downsample(buf: &[[f32; 3]]) -> Vec<[f32; 3]> {
     small
 }
 
+/// The wallpaper itself: radius `r` (0 = sharp). Blurs the quarter-res copy so dragging stays instant.
+fn wall_img(buf: &[[f32; 3]], small: &[[f32; 3]], r: usize) -> egui::ColorImage {
+    if r == 0 {
+        return sharp_img(buf);
+    }
+    let (sw, sh) = (BG_W / 4, BG_H / 4);
+    let mut b = small.to_vec();
+    box_blur(&mut b, sw, sh, r);
+    box_blur(&mut b, sw, sh, r);
+    to_img(&b, sw, sh)
+}
+
 /// The frosted layer behind every glass surface: blur radius `r` (0 = no blur) + 125% saturation.
 fn blur_img(buf: &[[f32; 3]], small: &[[f32; 3]], r: usize) -> egui::ColorImage {
     let (mut b, w, h) = if r == 0 {
@@ -427,6 +440,13 @@ fn load_bg(path: &std::path::Path) -> Result<Vec<[f32; 3]>, String> {
     let img = image::open(path).map_err(|e| e.to_string())?;
     let img = img.resize_to_fill(BG_W as u32, BG_H as u32, image::imageops::FilterType::Triangle).to_rgb8();
     Ok(img.pixels().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect())
+}
+
+/// Decode the embedded kasandra.ico at a given square size.
+fn icon_rgba(size: u32) -> Option<image::RgbaImage> {
+    image::load_from_memory_with_format(ICO, image::ImageFormat::Ico)
+        .ok()
+        .map(|i| i.resize_exact(size, size, image::imageops::FilterType::Lanczos3).to_rgba8())
 }
 
 fn make_grain() -> egui::ColorImage {
@@ -679,6 +699,7 @@ struct App {
     bg: TextureHandle,
     bg_blur: TextureHandle,
     grain: TextureHandle,
+    icon: TextureHandle,
     bg_buf: Vec<[f32; 3]>,
     bg_small: Vec<[f32; 3]>,
     blur_amt: f32,
@@ -717,18 +738,24 @@ impl App {
         cc.egui_ctx.set_visuals(v);
         let bg_buf = procedural_bg();
         let bg_small = downsample(&bg_buf);
-        let bg = cc.egui_ctx.load_texture("bg", sharp_img(&bg_buf), egui::TextureOptions::LINEAR);
+        let bg = cc.egui_ctx.load_texture("bg", wall_img(&bg_buf, &bg_small, 0), egui::TextureOptions::LINEAR);
         let bg_blur = cc.egui_ctx.load_texture("bg_blur", blur_img(&bg_buf, &bg_small, 5), egui::TextureOptions::LINEAR);
+        let icon_img = match icon_rgba(64) {
+            Some(im) => egui::ColorImage::from_rgba_unmultiplied([64, 64], &im.into_raw()),
+            None => egui::ColorImage::new([1, 1], Color32::TRANSPARENT),
+        };
+        let icon = cc.egui_ctx.load_texture("icon", icon_img, egui::TextureOptions::LINEAR);
         let grain = cc.egui_ctx.load_texture("grain", make_grain(), egui::TextureOptions::NEAREST);
         let (tx, rx) = channel();
         Self {
             bg,
             bg_blur,
             grain,
+            icon,
             bg_buf,
             bg_small,
-            blur_amt: 5.0,
-            blur_applied: 5,
+            blur_amt: 0.0,
+            blur_applied: 0,
             sidebar: false,
             popup: false,
             chats: vec![Chat { title: "New chat".into(), project: None, msgs: vec![], pending: false }],
@@ -788,14 +815,15 @@ impl App {
     /// New chat inside project `pj` (re-uses an empty one if it exists).
     fn apply_blur(&mut self) {
         let r = self.blur_amt.round() as usize;
-        self.bg_blur.set(blur_img(&self.bg_buf, &self.bg_small, r), egui::TextureOptions::LINEAR);
+        self.bg.set(wall_img(&self.bg_buf, &self.bg_small, r), egui::TextureOptions::LINEAR);
+        // glass frosting stays at least as soft as before, and follows the wallpaper when it gets blurrier
+        self.bg_blur.set(blur_img(&self.bg_buf, &self.bg_small, r.max(5)), egui::TextureOptions::LINEAR);
         self.blur_applied = r;
     }
 
     fn set_bg(&mut self, buf: Vec<[f32; 3]>) {
         self.bg_small = downsample(&buf);
         self.bg_buf = buf;
-        self.bg.set(sharp_img(&self.bg_buf), egui::TextureOptions::LINEAR);
         self.apply_blur();
     }
 
@@ -878,8 +906,10 @@ impl App {
                 let p = ui.painter().clone();
                 let px = 2.5;
                 let ty = rect.center().y - 3.5 * px;
-                pixel_text(&p, pos2(rect.left() + 18.0, ty + 1.0), "Kasandra", px, Color32::from_black_alpha(70));
-                pixel_text(&p, pos2(rect.left() + 18.0, ty), "Kasandra", px, Color32::from_rgb(244, 247, 255));
+                let ir = Rect::from_center_size(pos2(rect.left() + 26.0, rect.center().y), vec2(22.0, 22.0));
+                p.image(self.icon.id(), ir, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                pixel_text(&p, pos2(rect.left() + 46.0, ty + 1.0), "Kasandra", px, Color32::from_black_alpha(70));
+                pixel_text(&p, pos2(rect.left() + 46.0, ty), "Kasandra", px, Color32::from_rgb(244, 247, 255));
 
                 // orbs: minimize (yellow), maximize (green), close (red)
                 let cy = rect.center().y;
@@ -1054,7 +1084,7 @@ impl App {
                 pp.text(
                     pos2(bot.left() + 6.0, bot.top() + 20.0),
                     Align2::LEFT_CENTER,
-                    "Background blur",
+                    "Wallpaper blur",
                     FontId::proportional(13.0),
                     muted(),
                 );
@@ -1561,14 +1591,18 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result<()> {
-    let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Kasandra")
-            .with_inner_size([1120.0, 680.0])
-            .with_min_inner_size([640.0, 420.0])
-            .with_decorations(false)
-            .with_transparent(true),
-        ..Default::default()
-    };
+    let mut vb = egui::ViewportBuilder::default()
+        .with_title("Kasandra")
+        .with_app_id("kasandra")
+        .with_inner_size([1120.0, 680.0])
+        .with_min_inner_size([640.0, 420.0])
+        .with_decorations(false)
+        .with_transparent(true);
+    // taskbar / alt-tab icon
+    if let Some(im) = icon_rgba(256) {
+        let (w, h) = (im.width(), im.height());
+        vb = vb.with_icon(egui::IconData { rgba: im.into_raw(), width: w, height: h });
+    }
+    let opts = eframe::NativeOptions { viewport: vb, ..Default::default() };
     eframe::run_native("Kasandra", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
