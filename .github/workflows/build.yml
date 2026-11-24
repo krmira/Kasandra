@@ -10,8 +10,16 @@ on:
 permissions:
   contents: write
 
+# cancel older runs of the same branch/PR so they don't eat build time
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0          # incremental data is useless in CI and bloats the cache
+  CARGO_NET_RETRY: 10
+  CARGO_PROFILE_RELEASE_DEBUG: 0
 
 jobs:
   build:
@@ -24,50 +32,51 @@ jobs:
           - name: windows-x64
             os: windows-latest
             bin: kasandra.exe
+            out: kasandra-windows-x64.exe
           - name: linux-x64
             os: ubuntu-latest
             bin: kasandra
+            out: kasandra-linux-x64
           - name: macos-arm64
             os: macos-latest
             bin: kasandra
+            out: kasandra-macos-arm64
 
     steps:
       - uses: actions/checkout@v4
 
+      # cached apt packages (skips the slow apt-get install on repeat runs)
       - name: Install Linux deps
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libgl1-mesa-dev libssl-dev pkg-config
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev libssl-dev pkg-config libgtk-3-dev
+          version: 1.0
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # caches ~/.cargo registry + target/ dependencies; only main writes the cache,
+      # PRs and tags read from it
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: kasandra-${{ matrix.name }}
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build (release)
-        run: cargo build --release --locked || cargo build --release
+        run: cargo build --release
 
-      - name: Package
+      # give each binary a unique name: with archive:false the file name becomes the artifact name
+      - name: Rename binary
         shell: bash
-        run: |
-          mkdir dist
-          cp target/release/${{ matrix.bin }} dist/
-          cd dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a ../kasandra-${{ matrix.name }}.zip ${{ matrix.bin }}
-          else
-            tar czf ../kasandra-${{ matrix.name }}.tar.gz ${{ matrix.bin }}
-          fi
+        run: cp "target/release/${{ matrix.bin }}" "${{ matrix.out }}"
 
-      - uses: actions/upload-artifact@v4
+      # v7+ with archive:false uploads the single file as-is (no zip)
+      - uses: actions/upload-artifact@v7
         with:
-          name: kasandra-${{ matrix.name }}
-          path: |
-            kasandra-${{ matrix.name }}.zip
-            kasandra-${{ matrix.name }}.tar.gz
-          if-no-files-found: ignore
+          path: ${{ matrix.out }}
+          archive: false
+          if-no-files-found: error
 
   release:
     name: Publish release
@@ -75,7 +84,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
