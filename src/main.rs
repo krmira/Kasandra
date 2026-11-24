@@ -287,7 +287,7 @@ fn glow(p: &Painter, c: Pos2, r: f32) {
     use egui::epaint::{Vertex, WHITE_UV};
     let rings = [(0.0_f32, 1.0_f32), (0.35, 0.62), (0.7, 0.22), (1.0, 0.0)];
     let n = 56usize;
-    let col = |f: f32| Color32::from_rgba_premultiplied((55.0 * f) as u8, (95.0 * f) as u8, (140.0 * f) as u8, 0);
+    let col = |f: f32| Color32::from_rgba_premultiplied((34.0 * f) as u8, (60.0 * f) as u8, (90.0 * f) as u8, 0);
     let mut m = egui::Mesh::default();
     m.vertices.push(Vertex { pos: c, uv: WHITE_UV, color: col(1.0) });
     for (k, (rr, f)) in rings.iter().enumerate().skip(1) {
@@ -412,7 +412,9 @@ fn procedural_bg() -> Vec<[f32; 3]> {
             let vig = 1.0 - 0.4 * edge;
             let n = ((x as u32).wrapping_mul(1973) ^ (y as u32).wrapping_mul(9277)).wrapping_mul(2654435761) >> 24;
             let dither = n as f32 / 255.0 * 3.0 - 1.5; // kills banding
-            buf[y * BG_W + x] = c.map(|k| k * vig + dither);
+            let ph = (u * 96.0).fract();
+            let reed = 0.5 - 0.5 * (ph * std::f32::consts::TAU).cos();
+            buf[y * BG_W + x] = c.map(|k| k * vig * (0.93 + 0.07 * reed) + reed * 4.0 + dither);
         }
     }
     buf
@@ -2346,7 +2348,7 @@ impl App {
                                     pos2(card.left() + 6.0, card.top() + 56.0),
                                     pos2(card.right() - 6.0, card.bottom() - 8.0),
                                 );
-                                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(lr), |ui| {
+                                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(lr).layout(Layout::top_down(Align::Min)), |ui| {
                                     egui::ScrollArea::vertical()
                                         .id_salt(("ml", pi))
                                         .auto_shrink([false, false])
@@ -2547,6 +2549,20 @@ fn model_chip(ui: &mut Ui, label: &str, on: bool) -> Response {
 
 fn bubble(ui: &mut Ui, m: &Msg, salt: Id) {
     let maxw = (ui.available_width() * 0.84 - 36.0).max(120.0);
+    if m.user {
+        let mut job = egui::text::LayoutJob::simple(m.text.clone(), FontId::proportional(BODY_SIZE), Color32::WHITE, maxw);
+        for sec in job.sections.iter_mut() {
+            sec.format.line_height = Some(LINE_H);
+        }
+        let g = ui.painter().layout_job(job);
+        let size = g.size() + vec2(36.0, 28.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), size.y), Sense::hover());
+        let br = Rect::from_min_size(pos2(rect.right() - size.x, rect.top()), size);
+        ui.painter().rect_filled(br, Rounding::same(18.0), GREEN);
+        ui.painter().galley(br.min + vec2(18.0, 14.0), g, Color32::WHITE);
+        ui.add_space(22.0);
+        return;
+    }
     let layout = if m.user { Layout::right_to_left(Align::TOP) } else { Layout::left_to_right(Align::TOP) };
     ui.with_layout(layout, |ui| {
         ui.vertical(|ui| {
@@ -2652,14 +2668,17 @@ impl eframe::App for App {
         // mouse-reactive glow on the wallpaper (eases toward the pointer)
         let gid = Id::new("glow_pos");
         let prev: Pos2 = ctx.data(|d| d.get_temp(gid)).unwrap_or(screen.center());
-        let tgt = ctx.pointer_hover_pos().unwrap_or(prev);
+        let tgt = match ctx.pointer_hover_pos() {
+            Some(q) => screen.center() + (q - screen.center()) * 0.55,
+            None => prev,
+        };
         let dt = ctx.input(|i| i.stable_dt).min(0.05);
-        let cur = prev + (tgt - prev) * (1.0 - (-dt * 6.0).exp());
+        let cur = prev + (tgt - prev) * (1.0 - (-dt * 1.3).exp());
         ctx.data_mut(|d| d.insert_temp(gid, cur));
         if (tgt - cur).length() > 0.5 {
             ctx.request_repaint();
         }
-        glow(&painter.with_clip_rect(screen), cur, 380.0);
+        glow(&painter.with_clip_rect(screen), cur, 460.0);
 
         let side_t = ease(ctx.animate_bool_with_time(Id::new("side_t"), self.sidebar, 0.17));
         self.chat_ui(ctx, side_t, &bg);
