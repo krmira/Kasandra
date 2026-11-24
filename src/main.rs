@@ -293,7 +293,7 @@ fn glow(p: &Painter, c: Pos2, r: f32) {
     for (k, (rr, f)) in rings.iter().enumerate().skip(1) {
         for i in 0..n {
             let a = i as f32 / n as f32 * std::f32::consts::TAU;
-            m.vertices.push(Vertex { pos: c + vec2(a.cos(), a.sin()) * r * rr, uv: WHITE_UV, color: col(*f) });
+            m.vertices.push(Vertex { pos: c + vec2(a.cos(), a.sin()) * r * *rr, uv: WHITE_UV, color: col(*f) });
         }
         let base = 1 + (k - 1) * n;
         for i in 0..n {
