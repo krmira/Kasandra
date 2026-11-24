@@ -15,7 +15,13 @@ const TITLE_H: f32 = 34.0;
 const SIDEBAR_W: f32 = 290.0;
 const WIN_R: f32 = 18.0; // window corner radius
 const PANEL_R: f32 = 20.0; // glass panel radius
-const GLASS_A: f32 = 115.0; // 45% white
+const GLASS_A: f32 = 96.0; // base white tint of the acrylic (top is lighter, bottom darker)
+const GRAIN_A: u8 = 15; // acrylic noise strength (0 = off)
+const ACCENT: Color32 = Color32::from_rgb(10, 140, 255); // slider fill, same blue as the reference theme
+const BOT_H: f32 = 118.0; // height of the background controls at the bottom of the sidebar
+const BLUR_MAX: f32 = 14.0;
+const BG_W: usize = 960;
+const BG_H: usize = 540;
 const GREEN: Color32 = Color32::from_rgb(46, 204, 98);
 const GREEN_DK: Color32 = Color32::from_rgb(30, 168, 78);
 const INK: Color32 = Color32::from_rgb(20, 26, 42);
@@ -81,6 +87,7 @@ fn draw_arrow_up(p: &Painter, c: Pos2, r: f32, col: Color32) {
 struct Bg {
     sharp: egui::TextureId,
     blur: egui::TextureId,
+    grain: egui::TextureId,
     screen: Rect,
     uv: Rect,
     win_r: f32,
@@ -108,8 +115,8 @@ fn rounded_poly(r: Rect, rad: f32, seg: usize) -> Vec<Pos2> {
     v
 }
 
-/// Convex polygon filled with the background texture at the matching screen position.
-fn tex_poly(p: &Painter, bg: &Bg, tex: egui::TextureId, pts: &[Pos2], tint: Color32) {
+/// Fan-triangulated convex polygon with a per-vertex uv and colour.
+fn fan(p: &Painter, tex: egui::TextureId, pts: &[Pos2], uv: impl Fn(Pos2) -> Pos2, col: impl Fn(Pos2) -> Color32) {
     let n = pts.len();
     if n < 3 {
         return;
@@ -120,16 +127,10 @@ fn tex_poly(p: &Painter, bg: &Bg, tex: egui::TextureId, pts: &[Pos2], tint: Colo
         cy += q.y;
     }
     let cen = pos2(cx / n as f32, cy / n as f32);
-    let uv = |q: Pos2| {
-        pos2(
-            bg.uv.min.x + (q.x - bg.screen.min.x) / bg.screen.width() * bg.uv.width(),
-            bg.uv.min.y + (q.y - bg.screen.min.y) / bg.screen.height() * bg.uv.height(),
-        )
-    };
     let mut m = egui::Mesh::with_texture(tex);
-    m.vertices.push(egui::epaint::Vertex { pos: cen, uv: uv(cen), color: tint });
+    m.vertices.push(egui::epaint::Vertex { pos: cen, uv: uv(cen), color: col(cen) });
     for q in pts {
-        m.vertices.push(egui::epaint::Vertex { pos: *q, uv: uv(*q), color: tint });
+        m.vertices.push(egui::epaint::Vertex { pos: *q, uv: uv(*q), color: col(*q) });
     }
     for i in 0..n {
         m.indices.extend_from_slice(&[0, (1 + i) as u32, (1 + (i + 1) % n) as u32]);
@@ -137,16 +138,157 @@ fn tex_poly(p: &Painter, bg: &Bg, tex: egui::TextureId, pts: &[Pos2], tint: Colo
     p.add(Shape::mesh(m));
 }
 
-/// Real frosted glass: blurred copy of the background + 45% white tint, one uniform layer.
+/// Convex polygon filled with the background texture at the matching screen position.
+fn tex_poly(p: &Painter, bg: &Bg, tex: egui::TextureId, pts: &[Pos2], tint: Color32) {
+    let uv = |q: Pos2| {
+        pos2(
+            bg.uv.min.x + (q.x - bg.screen.min.x) / bg.screen.width() * bg.uv.width(),
+            bg.uv.min.y + (q.y - bg.screen.min.y) / bg.screen.height() * bg.uv.height(),
+        )
+    };
+    fan(p, tex, pts, uv, |_| tint);
+}
+
+/// Sutherland-Hodgman clip of a convex polygon against an axis-aligned rect.
+fn clip_poly(pts: &[Pos2], r: Rect) -> Vec<Pos2> {
+    let mut out = pts.to_vec();
+    for edge in 0..4 {
+        let inside = |p: Pos2| match edge {
+            0 => p.x >= r.left(),
+            1 => p.x <= r.right(),
+            2 => p.y >= r.top(),
+            _ => p.y <= r.bottom(),
+        };
+        let isect = |a: Pos2, b: Pos2| match edge {
+            0 | 1 => {
+                let x = if edge == 0 { r.left() } else { r.right() };
+                let t = (x - a.x) / (b.x - a.x);
+                pos2(x, a.y + t * (b.y - a.y))
+            }
+            _ => {
+                let y = if edge == 2 { r.top() } else { r.bottom() };
+                let t = (y - a.y) / (b.y - a.y);
+                pos2(a.x + t * (b.x - a.x), y)
+            }
+        };
+        let inp = std::mem::take(&mut out);
+        if inp.is_empty() {
+            break;
+        }
+        for i in 0..inp.len() {
+            let (a, b) = (inp[i], inp[(i + 1) % inp.len()]);
+            match (inside(a), inside(b)) {
+                (true, true) => out.push(b),
+                (true, false) => out.push(isect(a, b)),
+                (false, true) => {
+                    out.push(isect(a, b));
+                    out.push(b);
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Acrylic noise: a 256px noise tile repeated over the polygon (tiles are clipped, so no wrap mode needed).
+fn grain(p: &Painter, bg: &Bg, pts: &[Pos2], origin: Pos2, a: u8) {
+    if a == 0 {
+        return;
+    }
+    const T: f32 = 256.0;
+    let (mut lo, mut hi) = (pts[0], pts[0]);
+    for q in pts {
+        lo = pos2(lo.x.min(q.x), lo.y.min(q.y));
+        hi = pos2(hi.x.max(q.x), hi.y.max(q.y));
+    }
+    let tint = Color32::from_white_alpha(a);
+    let (x0, x1) = (((lo.x - origin.x) / T).floor() as i32, ((hi.x - origin.x) / T).floor() as i32);
+    let (y0, y1) = (((lo.y - origin.y) / T).floor() as i32, ((hi.y - origin.y) / T).floor() as i32);
+    for ty in y0..=y1 {
+        for tx in x0..=x1 {
+            let tile = Rect::from_min_size(origin + vec2(tx as f32 * T, ty as f32 * T), vec2(T, T));
+            let c = clip_poly(pts, tile);
+            fan(p, bg.grain, &c, |q| pos2((q.x - tile.left()) / T, (q.y - tile.top()) / T), |_| tint);
+        }
+    }
+}
+
+/// Acrylic: soft shadow, saturated blurred backdrop, luminosity-graded tint, top sheen,
+/// noise grain and a two-line rim light.
 fn glass(p: &Painter, bg: &Bg, rect: Rect, rad: f32, k: f32) {
+    // soft drop shadow (hidden under the opaque backdrop, only the falloff shows)
+    for i in 0..6 {
+        let g = (i + 1) as f32 * 2.0;
+        p.add(Shape::convex_polygon(
+            rounded_poly(rect.expand(g).translate(vec2(0.0, 4.0)), rad + g, 8),
+            Color32::from_black_alpha((4.0 * k) as u8),
+            Stroke::NONE,
+        ));
+    }
     let pts = rounded_poly(rect, rad, 10);
+    // 1. blurred + saturated copy of the window background
     tex_poly(p, bg, bg.blur, &pts, Color32::WHITE.gamma_multiply(k));
-    p.add(Shape::convex_polygon(
-        pts,
-        Color32::from_white_alpha((GLASS_A * k) as u8),
-        Stroke::new(1.0, Color32::from_white_alpha((90.0 * k) as u8)),
+    // 2. tint with a vertical luminosity gradient (lighter top, deeper bottom)
+    let (t, b) = (rect.top(), rect.bottom());
+    let h = (b - t).max(1.0);
+    fan(p, egui::TextureId::default(), &pts, |_| egui::epaint::WHITE_UV, |q| {
+        let f = ((q.y - t) / h).clamp(0.0, 1.0);
+        Color32::from_white_alpha(((GLASS_A + 20.0 - 40.0 * f) * k) as u8)
+    });
+    // 3. specular sheen fading out over the top half
+    fan(p, egui::TextureId::default(), &pts, |_| egui::epaint::WHITE_UV, |q| {
+        let f = ((q.y - t) / (h * 0.5)).clamp(0.0, 1.0);
+        Color32::from_white_alpha((36.0 * (1.0 - f) * k) as u8)
+    });
+    // 4. noise
+    grain(p, bg, &pts, rect.min, (GRAIN_A as f32 * k) as u8);
+    // 5. rim light: outer edge + faint inner edge
+    p.add(Shape::closed_line(pts, Stroke::new(1.0, Color32::from_white_alpha((120.0 * k) as u8))));
+    p.add(Shape::closed_line(
+        rounded_poly(rect.shrink(1.5), (rad - 1.5).max(0.0), 10),
+        Stroke::new(1.0, Color32::from_white_alpha((30.0 * k) as u8)),
     ));
 }
+
+/// Pill slider in the style of the reference theme: thin track, accent fill, white pill thumb.
+fn pill_slider(ui: &mut Ui, rect: Rect, id: Id, v: &mut f32, lo: f32, hi: f32) -> bool {
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    let act = resp.hovered() || resp.dragged();
+    let h = ui.ctx().animate_bool_with_time(id.with("h"), act, 0.12);
+    if act {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let thumb = vec2(46.0 + 3.0 * h, 26.0 + 1.0 * h);
+    let (x0, x1) = (rect.left() + thumb.x * 0.5, rect.right() - thumb.x * 0.5);
+    let mut changed = false;
+    if resp.is_pointer_button_down_on() || resp.clicked() {
+        if let Some(pp) = resp.interact_pointer_pos() {
+            let t = ((pp.x - x0) / (x1 - x0)).clamp(0.0, 1.0);
+            let nv = lo + t * (hi - lo);
+            if (nv - *v).abs() > 1e-4 {
+                *v = nv;
+                changed = true;
+            }
+        }
+    }
+    let t = ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let cx = x0 + t * (x1 - x0);
+    let cy = rect.center().y;
+    let p = ui.painter();
+    let track = Rect::from_min_max(pos2(rect.left(), cy - 3.0), pos2(rect.right(), cy + 3.0));
+    p.rect_filled(track, Rounding::same(3.0), Color32::from_black_alpha(36));
+    p.rect_filled(
+        Rect::from_min_max(track.min, pos2(cx, track.max.y)),
+        Rounding::same(3.0),
+        ACCENT,
+    );
+    let th = Rect::from_center_size(pos2(cx, cy), thumb);
+    p.rect_filled(th.expand(1.0).translate(vec2(0.0, 1.5)), Rounding::same(14.0), Color32::from_black_alpha(34));
+    p.rect_filled(th, Rounding::same(13.0), Color32::WHITE);
+    changed
+}
+
 
 /// 5x7 pixel glyphs, just enough for the title.
 fn glyph(c: char) -> [&'static str; 7] {
@@ -181,9 +323,9 @@ fn pixel_text(p: &Painter, pos: Pos2, text: &str, px: f32, col: Color32) {
 // ───────────────────────────── background ─────────────────────────────
 
 /// Procedural version of the silver/periwinkle reeded-glass reference, lightly blurred.
-fn make_bg() -> (egui::ColorImage, egui::ColorImage) {
-    const W: usize = 960;
-    const H: usize = 540;
+fn procedural_bg() -> Vec<[f32; 3]> {
+    const W: usize = BG_W;
+    const H: usize = BG_H;
     let sm = |a: f32, b: f32, x: f32| {
         let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
@@ -229,17 +371,26 @@ fn make_bg() -> (egui::ColorImage, egui::ColorImage) {
             buf[y * W + x] = c;
         }
     }
-    let mut sharp = buf.clone();
-    box_blur(&mut sharp, W, H, 2);
-    // heavily blurred, low-res copy for frosted glass
-    let (sw, sh) = (W / 4, H / 4);
+    buf
+}
+
+/// Lightly softened full-res copy used for the window background itself.
+fn sharp_img(buf: &[[f32; 3]]) -> egui::ColorImage {
+    let mut s = buf.to_vec();
+    box_blur(&mut s, BG_W, BG_H, 2);
+    to_img(&s, BG_W, BG_H)
+}
+
+/// Quarter-res copy; the blur slider works on this one so dragging stays instant.
+fn downsample(buf: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let (sw, sh) = (BG_W / 4, BG_H / 4);
     let mut small = vec![[0f32; 3]; sw * sh];
     for y in 0..sh {
         for x in 0..sw {
             let mut s = [0f32; 3];
             for dy in 0..4 {
                 for dx in 0..4 {
-                    let p = buf[(y * 4 + dy) * W + x * 4 + dx];
+                    let p = buf[(y * 4 + dy) * BG_W + x * 4 + dx];
                     s[0] += p[0];
                     s[1] += p[1];
                     s[2] += p[2];
@@ -248,9 +399,47 @@ fn make_bg() -> (egui::ColorImage, egui::ColorImage) {
             small[y * sw + x] = [s[0] / 16.0, s[1] / 16.0, s[2] / 16.0];
         }
     }
-    box_blur(&mut small, sw, sh, 5);
-    box_blur(&mut small, sw, sh, 5);
-    (to_img(&sharp, W, H), to_img(&small, sw, sh))
+    small
+}
+
+/// The frosted layer behind every glass surface: blur radius `r` (0 = no blur) + 125% saturation.
+fn blur_img(buf: &[[f32; 3]], small: &[[f32; 3]], r: usize) -> egui::ColorImage {
+    let (mut b, w, h) = if r == 0 {
+        (buf.to_vec(), BG_W, BG_H)
+    } else {
+        let (sw, sh) = (BG_W / 4, BG_H / 4);
+        let mut b = small.to_vec();
+        box_blur(&mut b, sw, sh, r);
+        box_blur(&mut b, sw, sh, r);
+        (b, sw, sh)
+    };
+    for p in b.iter_mut() {
+        let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        for c in p.iter_mut() {
+            *c = l + (*c - l) * 1.25;
+        }
+    }
+    to_img(&b, w, h)
+}
+
+/// Load any image, cover-crop it to the background aspect ratio.
+fn load_bg(path: &std::path::Path) -> Result<Vec<[f32; 3]>, String> {
+    let img = image::open(path).map_err(|e| e.to_string())?;
+    let img = img.resize_to_fill(BG_W as u32, BG_H as u32, image::imageops::FilterType::Triangle).to_rgb8();
+    Ok(img.pixels().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect())
+}
+
+fn make_grain() -> egui::ColorImage {
+    let mut st: u32 = 0x9E37_79B9;
+    let mut bytes = Vec::with_capacity(256 * 256 * 3);
+    for _ in 0..256 * 256 {
+        st ^= st << 13;
+        st ^= st >> 17;
+        st ^= st << 5;
+        let g = (st >> 24) as u8;
+        bytes.extend_from_slice(&[g, g, g]);
+    }
+    egui::ColorImage::from_rgb([256, 256], &bytes)
 }
 
 fn to_img(buf: &[[f32; 3]], w: usize, h: usize) -> egui::ColorImage {
@@ -483,11 +672,17 @@ enum Act {
     Select(usize),
     NewProject,
     ToggleProject(usize),
+    PickBg,
 }
 
 struct App {
     bg: TextureHandle,
     bg_blur: TextureHandle,
+    grain: TextureHandle,
+    bg_buf: Vec<[f32; 3]>,
+    bg_small: Vec<[f32; 3]>,
+    blur_amt: f32,
+    blur_applied: usize,
     sidebar: bool,
     popup: bool,
     chats: Vec<Chat>,
@@ -520,13 +715,20 @@ impl App {
         v.selection.stroke = Stroke::new(1.0, GREEN);
         v.window_stroke = Stroke::NONE;
         cc.egui_ctx.set_visuals(v);
-        let (sharp, blur) = make_bg();
-        let bg = cc.egui_ctx.load_texture("bg", sharp, egui::TextureOptions::LINEAR);
-        let bg_blur = cc.egui_ctx.load_texture("bg_blur", blur, egui::TextureOptions::LINEAR);
+        let bg_buf = procedural_bg();
+        let bg_small = downsample(&bg_buf);
+        let bg = cc.egui_ctx.load_texture("bg", sharp_img(&bg_buf), egui::TextureOptions::LINEAR);
+        let bg_blur = cc.egui_ctx.load_texture("bg_blur", blur_img(&bg_buf, &bg_small, 5), egui::TextureOptions::LINEAR);
+        let grain = cc.egui_ctx.load_texture("grain", make_grain(), egui::TextureOptions::NEAREST);
         let (tx, rx) = channel();
         Self {
             bg,
             bg_blur,
+            grain,
+            bg_buf,
+            bg_small,
+            blur_amt: 5.0,
+            blur_applied: 5,
             sidebar: false,
             popup: false,
             chats: vec![Chat { title: "New chat".into(), project: None, msgs: vec![], pending: false }],
@@ -584,6 +786,19 @@ impl App {
     }
 
     /// New chat inside project `pj` (re-uses an empty one if it exists).
+    fn apply_blur(&mut self) {
+        let r = self.blur_amt.round() as usize;
+        self.bg_blur.set(blur_img(&self.bg_buf, &self.bg_small, r), egui::TextureOptions::LINEAR);
+        self.blur_applied = r;
+    }
+
+    fn set_bg(&mut self, buf: Vec<[f32; 3]>) {
+        self.bg_small = downsample(&buf);
+        self.bg_buf = buf;
+        self.bg.set(sharp_img(&self.bg_buf), egui::TextureOptions::LINEAR);
+        self.apply_blur();
+    }
+
     fn new_chat(&mut self, pj: usize) {
         self.projects[pj].open = true;
         self.cur_project = Some(pj);
@@ -749,19 +964,21 @@ impl App {
         let x = 12.0 - (SIDEBAR_W + 24.0) * (1.0 - t);
         let rect = Rect::from_min_size(pos2(x, TITLE_H + 8.0), vec2(SIDEBAR_W, h));
         let mut acts: Vec<Act> = vec![];
+        let mut blur_v = self.blur_amt;
         Area::new(Id::new("sidebar")).order(Order::Foreground).fixed_pos(rect.min).constrain(false).show(
             ctx,
             |ui| {
                 ui.set_min_size(rect.size());
                 glass(ui.painter(), bg, rect, PANEL_R, 1.0);
                 let inner = rect.shrink2(vec2(14.0, 12.0));
-                ui.allocate_ui_at_rect(inner, |ui| {
+                let list = Rect::from_min_max(inner.min, pos2(inner.max.x, inner.max.y - BOT_H));
+                ui.allocate_ui_at_rect(list, |ui| {
                     ui.add_space(46.0); // room for the burger button
                     if section_header(ui, "Projects", Id::new("sh_proj")) {
                         acts.push(Act::NewProject);
                     }
                     egui::ScrollArea::vertical()
-                        .max_height(inner.height() - 46.0 - 28.0)
+                        .max_height(list.height() - 46.0 - 28.0)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             if self.projects.is_empty() {
@@ -826,8 +1043,49 @@ impl App {
                             }
                         });
                 });
+
+                // ── background controls ──
+                let bot = Rect::from_min_max(pos2(inner.left(), inner.bottom() - BOT_H), inner.max);
+                let pp = ui.painter().clone();
+                pp.line_segment(
+                    [pos2(bot.left() + 4.0, bot.top()), pos2(bot.right() - 4.0, bot.top())],
+                    Stroke::new(1.0, Color32::from_black_alpha(22)),
+                );
+                pp.text(
+                    pos2(bot.left() + 6.0, bot.top() + 20.0),
+                    Align2::LEFT_CENTER,
+                    "Background blur",
+                    FontId::proportional(13.0),
+                    muted(),
+                );
+                let srect = Rect::from_min_size(pos2(bot.left(), bot.top() + 34.0), vec2(bot.width(), 30.0));
+                pill_slider(ui, srect, Id::new("blur_slider"), &mut blur_v, 0.0, BLUR_MAX);
+
+                let btn = Rect::from_min_size(pos2(bot.left(), bot.bottom() - 42.0), vec2(bot.width(), 40.0));
+                let (r, h) = hit(ui, btn, Id::new("bg_pick"));
+                pp.rect_filled(btn, Rounding::same(20.0), Color32::from_white_alpha((70.0 + h * 80.0) as u8));
+                pp.rect_stroke(btn, Rounding::same(20.0), Stroke::new(1.0, Color32::from_white_alpha(100)));
+                let tr = pp.text(
+                    btn.center() + vec2(12.0, 0.0),
+                    Align2::CENTER_CENTER,
+                    "Change background",
+                    FontId::proportional(13.0),
+                    INK,
+                );
+                let ic = pos2(tr.left() - 17.0, btn.center().y);
+                let st = Stroke::new(1.4, INK);
+                pp.rect_stroke(Rect::from_center_size(ic, vec2(16.0, 13.0)), Rounding::same(3.0), st);
+                pp.circle_filled(ic + vec2(3.5, -2.0), 1.6, INK);
+                pp.add(Shape::line(
+                    vec![ic + vec2(-6.0, 4.0), ic + vec2(-2.0, -0.5), ic + vec2(1.0, 2.5), ic + vec2(3.0, 0.5), ic + vec2(6.0, 4.0)],
+                    Stroke::new(1.3, INK),
+                ));
+                if r.clicked() {
+                    acts.push(Act::PickBg);
+                }
             },
         );
+        self.blur_amt = blur_v;
         for a in acts {
             match a {
                 Act::NewChat(pj) => self.new_chat(pj),
@@ -835,6 +1093,16 @@ impl App {
                 Act::ToggleProject(i) => {
                     self.projects[i].open = !self.projects[i].open;
                     self.cur_project = Some(i);
+                }
+                Act::PickBg => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
+                        .pick_file()
+                    {
+                        if let Ok(buf) = load_bg(&path) {
+                            self.set_bg(buf);
+                        }
+                    }
                 }
                 Act::NewProject => {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -1256,6 +1524,9 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        if self.blur_amt.round() as usize != self.blur_applied {
+            self.apply_blur();
+        }
 
         let screen = ctx.screen_rect();
         let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -1271,6 +1542,7 @@ impl eframe::App for App {
         let bg = Bg {
             sharp: self.bg.id(),
             blur: self.bg_blur.id(),
+            grain: self.grain.id(),
             screen,
             uv,
             win_r: if maxed { 0.0 } else { WIN_R },
